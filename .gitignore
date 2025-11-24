@@ -1,0 +1,10 @@
+target/
+.cargo/
+borg-tool.toml
+
+# Editor/OS
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/

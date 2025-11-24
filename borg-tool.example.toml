@@ -1,0 +1,2 @@
+repo = "ssh://user@host/path/to/borg-repo"
+# borg_bin = "/usr/bin/borg"
