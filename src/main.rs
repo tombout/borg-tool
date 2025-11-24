@@ -14,8 +14,8 @@ use serde::Deserialize;
 )]
 struct Cli {
     /// Path to the config file
-    #[arg(short, long, default_value = "borg-tool.toml")]
-    config: PathBuf,
+    #[arg(short, long)]
+    config: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -54,12 +54,29 @@ fn default_borg_bin() -> String {
     "borg".to_string()
 }
 
+fn default_config_path() -> PathBuf {
+    if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("borg-tool").join("config.toml");
+    }
+
+    if let Ok(home) = env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("borg-tool")
+            .join("config.toml");
+    }
+
+    // Fallback to current dir as a last resort.
+    PathBuf::from("borg-tool.toml")
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cmd = cli.command.unwrap_or(Commands::List);
 
-    let config = load_config(&cli.config)
-        .with_context(|| format!("Failed to load config from {}", cli.config.display()))?;
+    let config_path = cli.config.unwrap_or_else(default_config_path);
+    let config = load_config(&config_path)
+        .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
 
     match cmd {
         Commands::List => list_archives(&config)?,
