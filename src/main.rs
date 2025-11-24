@@ -61,11 +61,6 @@ struct BorgArchive {
 }
 
 #[derive(Debug, Deserialize)]
-struct BorgItemsResponse {
-    items: Vec<BorgItem>,
-}
-
-#[derive(Debug, Deserialize)]
 struct BorgItem {
     path: String,
     #[serde(rename = "type")]
@@ -165,7 +160,11 @@ fn list_archives(cfg: &Config, passphrase: Option<&str>) -> Result<Vec<BorgArchi
 
 fn list_items(cfg: &Config, archive: &str, passphrase: Option<&str>) -> Result<Vec<BorgItem>> {
     let mut cmd = Command::new(&cfg.borg_bin);
-    cmd.args(["list", "--json", &format!("{}::{}", cfg.repo, archive)]);
+    cmd.args([
+        "list",
+        "--json-lines",
+        &format!("{}::{}", cfg.repo, archive),
+    ]);
 
     if let Some(pass) = passphrase {
         cmd.env("BORG_PASSPHRASE", pass);
@@ -184,9 +183,18 @@ fn list_items(cfg: &Config, archive: &str, passphrase: Option<&str>) -> Result<V
         );
     }
 
-    let parsed: BorgItemsResponse =
-        serde_json::from_slice(&output.stdout).context("Failed to parse borg JSON items")?;
-    Ok(parsed.items)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut items = Vec::new();
+    for (idx, line) in stdout.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let item: BorgItem = serde_json::from_str(trimmed)
+            .with_context(|| format!("Failed to parse JSON line {} from borg output", idx + 1))?;
+        items.push(item);
+    }
+    Ok(items)
 }
 
 fn ensure_passphrase(cfg: &Config) -> Result<Option<String>> {
