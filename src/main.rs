@@ -1,4 +1,9 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    io::{self, Write},
+    path::PathBuf,
+    process::Command,
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -25,6 +30,11 @@ struct Cli {
 enum Commands {
     /// List all archives in the configured repository
     List,
+    /// List files inside a chosen archive
+    Files {
+        /// Archive name; if omitted, you will be prompted to choose
+        archive: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +58,20 @@ struct BorgArchive {
     /// Timestamp string as returned by Borg (RFC3339)
     #[serde(rename = "time")]
     time_utc: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BorgItemsResponse {
+    items: Vec<BorgItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BorgItem {
+    path: String,
+    #[serde(rename = "type")]
+    item_type: Option<String>,
+    #[allow(dead_code)]
+    size: Option<u64>,
 }
 
 fn default_borg_bin() -> String {
@@ -78,8 +102,26 @@ fn main() -> Result<()> {
     let config = load_config(&config_path)
         .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
 
+    // Prompt passphrase once if needed; reused for subsequent borg calls.
+    let passphrase = ensure_passphrase(&config)?;
+
     match cmd {
-        Commands::List => list_archives(&config)?,
+        Commands::List => {
+            let archives = list_archives(&config, passphrase.as_deref())?;
+            print_archives(&archives);
+        }
+        Commands::Files { archive } => {
+            let archives = list_archives(&config, passphrase.as_deref())?;
+            let selected = match archive {
+                Some(name) => archives
+                    .iter()
+                    .find(|a| a.name == name)
+                    .ok_or_else(|| anyhow::anyhow!("Archive '{}' not found", name))?,
+                None => prompt_archive_selection(&archives)?,
+            };
+            let items = list_items(&config, &selected.name, passphrase.as_deref())?;
+            print_items(&items);
+        }
     }
 
     Ok(())
@@ -93,17 +135,12 @@ fn load_config(path: &PathBuf) -> Result<Config> {
     Ok(cfg)
 }
 
-fn list_archives(cfg: &Config) -> Result<()> {
+/// Return archives and optionally print them.
+fn list_archives(cfg: &Config, passphrase: Option<&str>) -> Result<Vec<BorgArchive>> {
     let mut cmd = Command::new(&cfg.borg_bin);
     cmd.args(["list", "--json", &cfg.repo]);
 
-    // If no passphrase is provided via env, ask with a clearer prompt.
-    if env::var("BORG_PASSCOMMAND").is_err() && env::var("BORG_PASSPHRASE").is_err() {
-        let prompt = format!(
-            "Enter passphrase for repo {} (leave empty if none): ",
-            cfg.repo
-        );
-        let pass = prompt_password(prompt).context("Reading passphrase failed")?;
+    if let Some(pass) = passphrase {
         cmd.env("BORG_PASSPHRASE", pass);
     }
 
@@ -123,15 +160,94 @@ fn list_archives(cfg: &Config) -> Result<()> {
     let parsed: BorgListResponse =
         serde_json::from_slice(&output.stdout).context("Failed to parse borg JSON output")?;
 
-    if parsed.archives.is_empty() {
-        println!("No archives found in {}", cfg.repo);
-        return Ok(());
+    Ok(parsed.archives)
+}
+
+fn list_items(cfg: &Config, archive: &str, passphrase: Option<&str>) -> Result<Vec<BorgItem>> {
+    let mut cmd = Command::new(&cfg.borg_bin);
+    cmd.args(["list", "--json", &format!("{}::{}", cfg.repo, archive)]);
+
+    if let Some(pass) = passphrase {
+        cmd.env("BORG_PASSPHRASE", pass);
     }
 
-    for arch in parsed.archives {
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "borg list for archive failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let parsed: BorgItemsResponse =
+        serde_json::from_slice(&output.stdout).context("Failed to parse borg JSON items")?;
+    Ok(parsed.items)
+}
+
+fn ensure_passphrase(cfg: &Config) -> Result<Option<String>> {
+    if env::var("BORG_PASSCOMMAND").is_ok() || env::var("BORG_PASSPHRASE").is_ok() {
+        return Ok(None);
+    }
+
+    let prompt = format!(
+        "Enter passphrase for repo {} (leave empty if none): ",
+        cfg.repo
+    );
+    let pass = prompt_password(prompt).context("Reading passphrase failed")?;
+    Ok(Some(pass))
+}
+
+fn prompt_archive_selection<'a>(archives: &'a [BorgArchive]) -> Result<&'a BorgArchive> {
+    if archives.is_empty() {
+        anyhow::bail!("No archives found");
+    }
+
+    println!("Select archive:");
+    for (idx, arch) in archives.iter().enumerate() {
+        let time = arch.time_utc.as_deref().unwrap_or("-");
+        println!("[{:>2}] {:<40} {}", idx + 1, arch.name, time);
+    }
+    print!("Enter number: ");
+    io::stdout().flush().ok();
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read selection")?;
+    let choice: usize = input
+        .trim()
+        .parse()
+        .context("Please enter a valid number")?;
+    if choice == 0 || choice > archives.len() {
+        anyhow::bail!("Choice out of range");
+    }
+    Ok(&archives[choice - 1])
+}
+
+fn print_archives(archives: &[BorgArchive]) {
+    if archives.is_empty() {
+        println!("No archives found");
+        return;
+    }
+    for arch in archives {
         let time = arch.time_utc.as_deref().unwrap_or("-");
         println!("{:<40} {}", arch.name, time);
     }
+}
 
-    Ok(())
+fn print_items(items: &[BorgItem]) {
+    if items.is_empty() {
+        println!("No files in archive");
+        return;
+    }
+
+    for item in items {
+        let kind = item.item_type.as_deref().unwrap_or("");
+        println!("{:<8} {}", kind, item.path);
+    }
 }
