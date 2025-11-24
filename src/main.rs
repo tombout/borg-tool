@@ -35,6 +35,8 @@ enum Commands {
         /// Archive name; if omitted, you will be prompted to choose
         archive: Option<String>,
     },
+    /// Start interactive navigation
+    Interactive,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,7 +93,7 @@ fn default_config_path() -> PathBuf {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let cmd = cli.command.unwrap_or(Commands::List);
+    let cmd = cli.command;
 
     let config_path = cli.config.unwrap_or_else(default_config_path);
     let config = load_config(&config_path)
@@ -101,11 +103,13 @@ fn main() -> Result<()> {
     let passphrase = ensure_passphrase(&config)?;
 
     match cmd {
-        Commands::List => {
+        None => run_interactive(&config, passphrase)?,
+        Some(Commands::Interactive) => run_interactive(&config, passphrase)?,
+        Some(Commands::List) => {
             let archives = list_archives(&config, passphrase.as_deref())?;
             print_archives(&archives);
         }
-        Commands::Files { archive } => {
+        Some(Commands::Files { archive }) => {
             let archives = list_archives(&config, passphrase.as_deref())?;
             let selected = match archive {
                 Some(name) => archives
@@ -208,6 +212,43 @@ fn ensure_passphrase(cfg: &Config) -> Result<Option<String>> {
     );
     let pass = prompt_password(prompt).context("Reading passphrase failed")?;
     Ok(Some(pass))
+}
+
+fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
+    let passphrase = passphrase;
+    loop {
+        println!();
+        println!("borg-tool interactive");
+        println!("1) List archives");
+        println!("2) List files in archive");
+        println!("q) Quit");
+        print!("Select option: ");
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read input")?;
+        match input.trim() {
+            "1" => {
+                let archives = list_archives(cfg, passphrase.as_deref())?;
+                print_archives(&archives);
+            }
+            "2" => {
+                let archives = list_archives(cfg, passphrase.as_deref())?;
+                if archives.is_empty() {
+                    println!("No archives found");
+                    continue;
+                }
+                let selected = prompt_archive_selection(&archives)?;
+                let items = list_items(cfg, &selected.name, passphrase.as_deref())?;
+                print_items(&items);
+            }
+            "q" | "quit" | "exit" => break,
+            _ => println!("Unknown option"),
+        }
+    }
+    Ok(())
 }
 
 fn prompt_archive_selection<'a>(archives: &'a [BorgArchive]) -> Result<&'a BorgArchive> {
