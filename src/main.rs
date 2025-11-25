@@ -110,6 +110,14 @@ struct RepoCtx {
     repo: String,
     borg_bin: String,
     mount_root: PathBuf,
+    status: RepoStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoStatus {
+    Ok,
+    MissingLocal,
+    Unknown,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +150,19 @@ fn default_config_path() -> PathBuf {
     PathBuf::from("borg-tool.toml")
 }
 
+fn repo_status(repo: &str) -> RepoStatus {
+    if repo.contains("://") || (repo.contains('@') && repo.contains(':')) {
+        return RepoStatus::Unknown; // remote, don't probe
+    }
+
+    let path = Path::new(repo);
+    if path.exists() {
+        RepoStatus::Ok
+    } else {
+        RepoStatus::MissingLocal
+    }
+}
+
 fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
     if !cfg.repos.is_empty() {
         cfg.repos
@@ -154,6 +175,7 @@ fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
                     .mount_root
                     .clone()
                     .unwrap_or_else(|| cfg.mount_root.clone()),
+                status: repo_status(&r.repo),
             })
             .collect()
     } else if let Some(repo) = &cfg.repo {
@@ -162,6 +184,7 @@ fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
             repo: repo.clone(),
             borg_bin: cfg.borg_bin.clone(),
             mount_root: cfg.mount_root.clone(),
+            status: repo_status(repo),
         }]
     } else {
         Vec::new()
@@ -197,7 +220,7 @@ fn select_repo_ctx(
     // multiple repos
     if let Some(req) = cli_repo {
         if let Some(found) = repos.iter().find(|r| r.name == req) {
-            return Ok(found.clone());
+            return ensure_repo_available(found.clone(), cmd);
         }
         let names = repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>();
         anyhow::bail!("Repo '{}' not found. Available: {}", req, names.join(", "));
@@ -208,17 +231,17 @@ fn select_repo_ctx(
         None | Some(Commands::Interactive) => {
             let labels: Vec<String> = repos
                 .iter()
-                .map(|r| format!("{}  ({})", r.name, r.repo))
+                .map(|r| format!("{}  ({}) [{}]", r.name, r.repo, status_label(r.status)))
                 .collect();
             let choice = Select::with_theme(theme)
                 .with_prompt("Choose repository")
                 .items(&labels)
                 .default(0)
                 .interact_opt()?;
-            match choice {
-                Some(idx) => Ok(repos[idx].clone()),
+            return match choice {
+                Some(idx) => ensure_repo_available(repos[idx].clone(), cmd),
                 None => anyhow::bail!("No repository selected"),
-            }
+            };
         }
         _ => {
             let names = repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>();
@@ -564,6 +587,31 @@ fn ensure_mount_available(ctx: &RepoCtx) -> Result<bool> {
 
     // fallback: assume available to avoid false negatives
     Ok(true)
+}
+
+fn ensure_repo_available(repo: RepoCtx, cmd: Option<&Commands>) -> Result<RepoCtx> {
+    if repo.status == RepoStatus::MissingLocal {
+        match cmd {
+            None | Some(Commands::Interactive) => {
+                println!(
+                    "Warning: repo '{}' path '{}' not found.",
+                    repo.name, repo.repo
+                );
+            }
+            _ => {
+                anyhow::bail!("Repo '{}' path '{}' not found.", repo.name, repo.repo);
+            }
+        }
+    }
+    Ok(repo)
+}
+
+fn status_label(status: RepoStatus) -> &'static str {
+    match status {
+        RepoStatus::Ok => "ok",
+        RepoStatus::MissingLocal => "missing",
+        RepoStatus::Unknown => "remote?",
+    }
 }
 
 fn ensure_passphrase(ctx: &RepoCtx) -> Result<Option<String>> {
