@@ -1,12 +1,8 @@
-use std::{
-    env, fs,
-    io::{self, Write},
-    path::PathBuf,
-    process::Command,
-};
+use std::{env, fs, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use rpassword::prompt_password;
 use serde::Deserialize;
 
@@ -53,7 +49,7 @@ struct BorgListResponse {
     archives: Vec<BorgArchive>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct BorgArchive {
     #[serde(rename = "archive")]
     name: String,
@@ -62,7 +58,7 @@ struct BorgArchive {
     time_utc: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct BorgItem {
     path: String,
     #[serde(rename = "type")]
@@ -111,12 +107,17 @@ fn main() -> Result<()> {
         }
         Some(Commands::Files { archive }) => {
             let archives = list_archives(&config, passphrase.as_deref())?;
+            let theme = ColorfulTheme::default();
             let selected = match archive {
                 Some(name) => archives
                     .iter()
                     .find(|a| a.name == name)
+                    .cloned()
                     .ok_or_else(|| anyhow::anyhow!("Archive '{}' not found", name))?,
-                None => prompt_archive_selection(&archives)?,
+                None => match select_archive(&archives, &theme)? {
+                    Some(a) => a,
+                    None => return Ok(()),
+                },
             };
             let items = list_items(&config, &selected.name, passphrase.as_deref())?;
             print_items(&items);
@@ -201,6 +202,76 @@ fn list_items(cfg: &Config, archive: &str, passphrase: Option<&str>) -> Result<V
     Ok(items)
 }
 
+fn select_archive(archives: &[BorgArchive], theme: &ColorfulTheme) -> Result<Option<BorgArchive>> {
+    let items: Vec<String> = archives
+        .iter()
+        .map(|a| {
+            let time = a.time_utc.as_deref().unwrap_or("-");
+            format!("{}  [{}]", a.name, time)
+        })
+        .collect();
+
+    let selection = Select::with_theme(theme)
+        .with_prompt("Choose archive (Esc/CTRL+C to quit)")
+        .items(&items)
+        .default(0)
+        .interact_opt()?;
+
+    Ok(selection.map(|idx| archives[idx].clone()))
+}
+
+fn select_item(items: &[BorgItem], theme: &ColorfulTheme) -> Result<Option<BorgItem>> {
+    let display: Vec<String> = items
+        .iter()
+        .map(|i| format!("{:<6} {}", i.item_type.as_deref().unwrap_or(""), i.path))
+        .collect();
+
+    let selection = Select::with_theme(theme)
+        .with_prompt("Choose file (Esc/Enter empty to go back)")
+        .items(&display)
+        .default(0)
+        .interact_opt()?;
+
+    Ok(selection.map(|idx| items[idx].clone()))
+}
+
+fn extract_file(
+    cfg: &Config,
+    archive: &str,
+    path_in_archive: &str,
+    dest_dir: &str,
+    passphrase: Option<&str>,
+) -> Result<()> {
+    fs::create_dir_all(dest_dir).with_context(|| format!("Create destination {}", dest_dir))?;
+
+    let mut cmd = Command::new(&cfg.borg_bin);
+    cmd.current_dir(dest_dir);
+    cmd.args([
+        "extract",
+        &format!("{}::{}", cfg.repo, archive),
+        path_in_archive,
+    ]);
+
+    if let Some(pass) = passphrase {
+        cmd.env("BORG_PASSPHRASE", pass);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "borg extract failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    Ok(())
+}
+
 fn ensure_passphrase(cfg: &Config) -> Result<Option<String>> {
     if env::var("BORG_PASSCOMMAND").is_ok() || env::var("BORG_PASSPHRASE").is_ok() {
         return Ok(None);
@@ -215,67 +286,56 @@ fn ensure_passphrase(cfg: &Config) -> Result<Option<String>> {
 }
 
 fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
-    let passphrase = passphrase;
-    loop {
-        println!();
-        println!("borg-tool interactive");
-        println!("1) List archives");
-        println!("2) List files in archive");
-        println!("q) Quit");
-        print!("Select option: ");
-        io::stdout().flush().ok();
+    let theme = ColorfulTheme::default();
+    let current_pass = passphrase;
 
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .context("Failed to read input")?;
-        match input.trim() {
-            "1" => {
-                let archives = list_archives(cfg, passphrase.as_deref())?;
-                print_archives(&archives);
+    loop {
+        let archives = list_archives(cfg, current_pass.as_deref())?;
+        if archives.is_empty() {
+            println!("No archives found");
+            return Ok(());
+        }
+
+        let archive = match select_archive(&archives, &theme)? {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+
+        loop {
+            let items = list_items(cfg, &archive.name, current_pass.as_deref())?;
+            if items.is_empty() {
+                println!("No files in archive {}", archive.name);
+                break;
             }
-            "2" => {
-                let archives = list_archives(cfg, passphrase.as_deref())?;
-                if archives.is_empty() {
-                    println!("No archives found");
-                    continue;
-                }
-                let selected = prompt_archive_selection(&archives)?;
-                let items = list_items(cfg, &selected.name, passphrase.as_deref())?;
-                print_items(&items);
+
+            let item = match select_item(&items, &theme)? {
+                Some(i) => i,
+                None => break, // back to archive list
+            };
+
+            if Confirm::with_theme(&theme)
+                .with_prompt(format!(
+                    "Extract '{}' from '{}' to current directory?",
+                    item.path, archive.name
+                ))
+                .default(false)
+                .interact()?
+            {
+                let dest: String = Input::with_theme(&theme)
+                    .with_prompt("Destination directory")
+                    .default(".".to_string())
+                    .interact_text()?;
+                extract_file(
+                    cfg,
+                    &archive.name,
+                    &item.path,
+                    &dest,
+                    current_pass.as_deref(),
+                )?;
+                println!("Extracted to {}", dest);
             }
-            "q" | "quit" | "exit" => break,
-            _ => println!("Unknown option"),
         }
     }
-    Ok(())
-}
-
-fn prompt_archive_selection<'a>(archives: &'a [BorgArchive]) -> Result<&'a BorgArchive> {
-    if archives.is_empty() {
-        anyhow::bail!("No archives found");
-    }
-
-    println!("Select archive:");
-    for (idx, arch) in archives.iter().enumerate() {
-        let time = arch.time_utc.as_deref().unwrap_or("-");
-        println!("[{:>2}] {:<40} {}", idx + 1, arch.name, time);
-    }
-    print!("Enter number: ");
-    io::stdout().flush().ok();
-
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .context("Failed to read selection")?;
-    let choice: usize = input
-        .trim()
-        .parse()
-        .context("Please enter a valid number")?;
-    if choice == 0 || choice > archives.len() {
-        anyhow::bail!("Choice out of range");
-    }
-    Ok(&archives[choice - 1])
 }
 
 fn print_archives(archives: &[BorgArchive]) {
