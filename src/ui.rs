@@ -214,54 +214,66 @@ pub fn select_archive(
     archives: &[BorgArchive],
     theme: &ColorfulTheme,
 ) -> Result<Option<BorgArchive>> {
-    let items: Vec<String> = archives
+    let mut items: Vec<String> = archives
         .iter()
         .map(|a| {
             let time = a.time_utc.as_deref().unwrap_or("-");
             format!("{}  [{}]", a.name, time)
         })
         .collect();
+    items.push("Back".to_string());
 
     let selection = Select::with_theme(theme)
-        .with_prompt("Choose archive (Esc/CTRL+C to quit)")
+        .with_prompt("Choose archive (Back to return)")
         .items(&items)
         .default(0)
         .interact_opt()?;
 
-    Ok(selection.map(|idx| archives[idx].clone()))
+    Ok(match selection {
+        Some(idx) if idx < archives.len() => Some(archives[idx].clone()),
+        _ => None,
+    })
 }
 
 pub fn select_item(items: &[BorgItem], theme: &ColorfulTheme) -> Result<Option<BorgItem>> {
-    let display: Vec<String> = items
+    let mut display: Vec<String> = items
         .iter()
         .map(|i| format!("{:<6} {}", i.item_type.as_deref().unwrap_or(""), i.path))
         .collect();
+    display.push("Back".to_string());
 
     let selection = Select::with_theme(theme)
-        .with_prompt("Choose file (Esc to go back)")
+        .with_prompt("Choose file (Back to return)")
         .items(&display)
         .default(0)
         .interact_opt()?;
 
-    Ok(selection.map(|idx| items[idx].clone()))
+    Ok(match selection {
+        Some(idx) if idx < items.len() => Some(items[idx].clone()),
+        _ => None,
+    })
 }
 
 pub fn select_backup(
     backups: &[BackupConfig],
     theme: &ColorfulTheme,
 ) -> Result<Option<BackupConfig>> {
-    let labels: Vec<String> = backups
+    let mut labels: Vec<String> = backups
         .iter()
         .map(|b| format!("{}  ({} includes)", b.name, b.includes.len()))
         .collect();
+    labels.push("Back".to_string());
 
     let selection = Select::with_theme(theme)
-        .with_prompt("Choose backup preset (Esc/CTRL+C to quit)")
+        .with_prompt("Choose backup preset (Back to return)")
         .items(&labels)
         .default(0)
         .interact_opt()?;
 
-    Ok(selection.map(|idx| backups[idx].clone()))
+    Ok(match selection {
+        Some(idx) if idx < backups.len() => Some(backups[idx].clone()),
+        _ => None,
+    })
 }
 
 fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
