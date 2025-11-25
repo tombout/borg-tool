@@ -142,6 +142,7 @@ pub fn select_main_action(theme: &ColorfulTheme) -> Result<MainAction> {
         Some(0) => MainAction::Archives,
         Some(1) => MainAction::Backups,
         Some(2) => MainAction::BackRepo,
+        None => MainAction::BackRepo, // Esc -> go back one level
         _ => MainAction::Quit,
     };
     Ok(action)
@@ -158,7 +159,7 @@ pub fn select_repo_ctx(
     cli_repo: Option<&str>,
     cmd: Option<&crate::cli::Commands>,
     theme: &ColorfulTheme,
-) -> Result<RepoCtx> {
+) -> Result<Option<RepoCtx>> {
     let repos = build_repo_list(cfg);
     if repos.is_empty() {
         anyhow::bail!("No repositories configured in config file");
@@ -176,13 +177,13 @@ pub fn select_repo_ctx(
                 );
             }
         }
-        return Ok(ctx);
+        return Ok(Some(ctx));
     }
 
     // multiple repos
     if let Some(req) = cli_repo {
         if let Some(found) = repos.iter().find(|r| r.name == req) {
-            return ensure_repo_available(found.clone(), cmd);
+            return ensure_repo_available(found.clone(), cmd).map(Some);
         }
         let names = repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>();
         anyhow::bail!("Repo '{}' not found. Available: {}", req, names.join(", "));
@@ -194,18 +195,21 @@ pub fn select_repo_ctx(
         | Some(crate::cli::Commands::Interactive)
         | Some(crate::cli::Commands::Backup { .. }) => {
             show_step("Choose repository", &[])?;
-            let labels: Vec<String> = repos
+            let mut labels: Vec<String> = repos
                 .iter()
                 .map(|r| format!("{}  ({}) [{}]", r.name, r.repo, status_label(r.status)))
                 .collect();
+            labels.push("Back".to_string());
             let choice = Select::with_theme(theme)
-                .with_prompt("Choose repository")
+                .with_prompt("Choose repository (Esc/Back to quit)")
                 .items(&labels)
                 .default(0)
                 .interact_opt()?;
             return match choice {
-                Some(idx) => ensure_repo_available(repos[idx].clone(), cmd),
-                None => anyhow::bail!("No repository selected"),
+                Some(idx) if idx < repos.len() => {
+                    ensure_repo_available(repos[idx].clone(), cmd).map(Some)
+                }
+                _ => Ok(None),
             };
         }
         _ => {
