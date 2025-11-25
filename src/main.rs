@@ -608,6 +608,13 @@ enum ArchiveAction {
     Back,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum MainAction {
+    Archives,
+    Backups,
+    Quit,
+}
+
 fn select_archive_action(
     theme: &ColorfulTheme,
     has_mount: bool,
@@ -639,6 +646,22 @@ fn select_archive_action(
             }
         }
         None => ArchiveAction::Back,
+    };
+    Ok(action)
+}
+
+fn select_main_action(theme: &ColorfulTheme) -> Result<MainAction> {
+    let options = ["Archives", "Backups", "Quit"];
+    let choice = Select::with_theme(theme)
+        .with_prompt("What do you want to do?")
+        .items(&options)
+        .default(0)
+        .interact_opt()?;
+
+    let action = match choice {
+        Some(0) => MainAction::Archives,
+        Some(1) => MainAction::Backups,
+        _ => MainAction::Quit,
     };
     Ok(action)
 }
@@ -939,64 +962,74 @@ fn run_interactive(repo: &RepoCtx, passphrase: Option<String>) -> Result<()> {
     let mount_available = ensure_mount_available(repo).unwrap_or(false);
 
     loop {
-        let archives = list_archives(repo, current_pass.as_deref())?;
-        if archives.is_empty() {
-            println!("No archives found");
-            return Ok(());
-        }
+        match select_main_action(&theme)? {
+            MainAction::Archives => {
+                let archives = list_archives(repo, current_pass.as_deref())?;
+                if archives.is_empty() {
+                    println!("No archives found");
+                    continue;
+                }
 
-        if !mount_available {
-            println!("(Mount unavailable: no FUSE support detected)");
-        } else if let Some(m) = &mount_state {
-            println!("Mounted: {} @ {}", m.archive, m.mountpoint.display());
-        }
+                if !mount_available {
+                    println!("(Mount unavailable: no FUSE support detected)");
+                } else if let Some(m) = &mount_state {
+                    println!("Mounted: {} @ {}", m.archive, m.mountpoint.display());
+                }
 
-        let archive = match select_archive(&archives, &theme)? {
-            Some(a) => a,
-            None => return Ok(()),
-        };
+                let archive = match select_archive(&archives, &theme)? {
+                    Some(a) => a,
+                    None => continue,
+                };
 
-        match select_archive_action(&theme, mount_state.is_some(), mount_available)? {
-            ArchiveAction::Browse => {
-                browse_files(repo, &archive, current_pass.as_deref(), &theme)?;
-            }
-            ArchiveAction::Mount => {
-                if let Some(active) = &mount_state {
-                    if Confirm::with_theme(&theme)
-                        .with_prompt(format!(
-                            "Unmount current ({}) before mounting new one?",
-                            active.mountpoint.display()
-                        ))
-                        .default(true)
-                        .interact()?
-                    {
-                        umount_archive(repo, &active.mountpoint, current_pass.as_deref())?;
-                        println!("Unmounted {}", active.mountpoint.display());
-                    } else {
-                        continue;
+                match select_archive_action(&theme, mount_state.is_some(), mount_available)? {
+                    ArchiveAction::Browse => {
+                        browse_files(repo, &archive, current_pass.as_deref(), &theme)?;
+                    }
+                    ArchiveAction::Mount => {
+                        if let Some(active) = &mount_state {
+                            if Confirm::with_theme(&theme)
+                                .with_prompt(format!(
+                                    "Unmount current ({}) before mounting new one?",
+                                    active.mountpoint.display()
+                                ))
+                                .default(true)
+                                .interact()?
+                            {
+                                umount_archive(repo, &active.mountpoint, current_pass.as_deref())?;
+                                println!("Unmounted {}", active.mountpoint.display());
+                            } else {
+                                continue;
+                            }
+                        }
+
+                        let default_mp = default_mountpoint(repo, &archive.name);
+                        let target: String = Input::with_theme(&theme)
+                            .with_prompt("Mountpoint")
+                            .default(default_mp.display().to_string())
+                            .interact_text()?;
+                        let target_path = PathBuf::from(target);
+                        mount_archive(repo, &archive.name, &target_path, current_pass.as_deref())?;
+                        println!("Mounted {} at {}", archive.name, target_path.display());
+                        mount_state = Some(MountInfo {
+                            archive: archive.name.clone(),
+                            mountpoint: target_path,
+                        });
+                    }
+                    ArchiveAction::Back => {}
+                    ArchiveAction::UnmountCurrent => {
+                        if let Some(active) = mount_state.take() {
+                            umount_archive(repo, &active.mountpoint, current_pass.as_deref())?;
+                            println!("Unmounted {}", active.mountpoint.display());
+                        }
                     }
                 }
-
-                let default_mp = default_mountpoint(repo, &archive.name);
-                let target: String = Input::with_theme(&theme)
-                    .with_prompt("Mountpoint")
-                    .default(default_mp.display().to_string())
-                    .interact_text()?;
-                let target_path = PathBuf::from(target);
-                mount_archive(repo, &archive.name, &target_path, current_pass.as_deref())?;
-                println!("Mounted {} at {}", archive.name, target_path.display());
-                mount_state = Some(MountInfo {
-                    archive: archive.name.clone(),
-                    mountpoint: target_path,
-                });
             }
-            ArchiveAction::Back => {}
-            ArchiveAction::UnmountCurrent => {
-                if let Some(active) = mount_state.take() {
-                    umount_archive(repo, &active.mountpoint, current_pass.as_deref())?;
-                    println!("Unmounted {}", active.mountpoint.display());
+            MainAction::Backups => {
+                if let Err(err) = run_backup(repo, None, current_pass.as_deref()) {
+                    println!("Backup failed: {err}");
                 }
             }
+            MainAction::Quit => return Ok(()),
         }
     }
 }
