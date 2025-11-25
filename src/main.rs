@@ -1,4 +1,8 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -33,6 +37,19 @@ enum Commands {
     },
     /// Start interactive navigation
     Interactive,
+    /// Mount an archive to a target path
+    Mount {
+        /// Archive name
+        archive: String,
+        /// Target mountpoint
+        #[arg(short, long)]
+        target: Option<PathBuf>,
+    },
+    /// Unmount a mounted archive (by mountpoint)
+    Umount {
+        /// Mountpoint to unmount
+        mountpoint: PathBuf,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +59,9 @@ struct Config {
     /// Borg binary to invoke (optional)
     #[serde(default = "default_borg_bin")]
     borg_bin: String,
+    /// Root directory for mounts
+    #[serde(default = "default_mount_root")]
+    mount_root: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,8 +87,18 @@ struct BorgItem {
     size: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+struct MountInfo {
+    archive: String,
+    mountpoint: PathBuf,
+}
+
 fn default_borg_bin() -> String {
     "borg".to_string()
+}
+
+fn default_mount_root() -> PathBuf {
+    env::temp_dir().join("borg-tool-mounts")
 }
 
 fn default_config_path() -> PathBuf {
@@ -121,6 +151,15 @@ fn main() -> Result<()> {
             };
             let items = list_items(&config, &selected.name, passphrase.as_deref())?;
             print_items(&items);
+        }
+        Some(Commands::Mount { archive, target }) => {
+            let mountpoint = target.unwrap_or_else(|| default_mountpoint(&config, &archive));
+            mount_archive(&config, &archive, &mountpoint, passphrase.as_deref())?;
+            println!("Mounted {} at {}", archive, mountpoint.display());
+        }
+        Some(Commands::Umount { mountpoint }) => {
+            umount_archive(&config, &mountpoint, passphrase.as_deref())?;
+            println!("Unmounted {}", mountpoint.display());
         }
     }
 
@@ -227,12 +266,48 @@ fn select_item(items: &[BorgItem], theme: &ColorfulTheme) -> Result<Option<BorgI
         .collect();
 
     let selection = Select::with_theme(theme)
-        .with_prompt("Choose file (Esc/Enter empty to go back)")
+        .with_prompt("Choose file (Esc to go back)")
         .items(&display)
         .default(0)
         .interact_opt()?;
 
     Ok(selection.map(|idx| items[idx].clone()))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArchiveAction {
+    Browse,
+    Mount,
+    UnmountCurrent,
+    Back,
+}
+
+fn select_archive_action(theme: &ColorfulTheme, has_mount: bool) -> Result<ArchiveAction> {
+    let mut options = vec!["Browse files", "Mount"];
+    if has_mount {
+        options.push("Unmount current");
+    }
+    options.push("Back");
+
+    let choice = Select::with_theme(theme)
+        .with_prompt("Action (Enter)")
+        .items(&options)
+        .default(0)
+        .interact_opt()?;
+
+    let action = match choice {
+        Some(idx) => {
+            let label = options[idx];
+            match label {
+                "Browse files" => ArchiveAction::Browse,
+                "Mount" => ArchiveAction::Mount,
+                "Unmount current" => ArchiveAction::UnmountCurrent,
+                _ => ArchiveAction::Back,
+            }
+        }
+        None => ArchiveAction::Back,
+    };
+    Ok(action)
 }
 
 fn extract_file(
@@ -279,6 +354,70 @@ fn extract_file(
     Ok(())
 }
 
+fn mount_archive(
+    cfg: &Config,
+    archive: &str,
+    mountpoint: &Path,
+    passphrase: Option<&str>,
+) -> Result<()> {
+    fs::create_dir_all(mountpoint)
+        .with_context(|| format!("Create mountpoint {}", mountpoint.display()))?;
+
+    let mut cmd = Command::new(&cfg.borg_bin);
+    cmd.args([
+        "mount",
+        &format!("{}::{}", cfg.repo, archive),
+        &mountpoint.display().to_string(),
+    ]);
+
+    if let Some(pass) = passphrase {
+        cmd.env("BORG_PASSPHRASE", pass);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "borg mount failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    Ok(())
+}
+
+fn umount_archive(cfg: &Config, mountpoint: &Path, passphrase: Option<&str>) -> Result<()> {
+    let mut cmd = Command::new(&cfg.borg_bin);
+    cmd.args(["umount", &mountpoint.display().to_string()]);
+
+    if let Some(pass) = passphrase {
+        cmd.env("BORG_PASSPHRASE", pass);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "borg umount failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    Ok(())
+}
+
+fn default_mountpoint(cfg: &Config, archive: &str) -> PathBuf {
+    cfg.mount_root.join(archive)
+}
+
 fn ensure_passphrase(cfg: &Config) -> Result<Option<String>> {
     if env::var("BORG_PASSCOMMAND").is_ok() || env::var("BORG_PASSPHRASE").is_ok() {
         return Ok(None);
@@ -295,6 +434,7 @@ fn ensure_passphrase(cfg: &Config) -> Result<Option<String>> {
 fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
     let theme = ColorfulTheme::default();
     let current_pass = passphrase;
+    let mut mount_state: Option<MountInfo> = None;
 
     loop {
         let archives = list_archives(cfg, current_pass.as_deref())?;
@@ -303,44 +443,92 @@ fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
             return Ok(());
         }
 
+        if let Some(m) = &mount_state {
+            println!("Mounted: {} @ {}", m.archive, m.mountpoint.display());
+        }
+
         let archive = match select_archive(&archives, &theme)? {
             Some(a) => a,
             None => return Ok(()),
         };
 
-        loop {
-            let items = list_items(cfg, &archive.name, current_pass.as_deref())?;
-            if items.is_empty() {
-                println!("No files in archive {}", archive.name);
-                break;
+        match select_archive_action(&theme, mount_state.is_some())? {
+            ArchiveAction::Browse => {
+                browse_files(cfg, &archive, current_pass.as_deref(), &theme)?;
             }
+            ArchiveAction::Mount => {
+                if let Some(active) = &mount_state {
+                    if Confirm::with_theme(&theme)
+                        .with_prompt(format!(
+                            "Unmount current ({}) before mounting new one?",
+                            active.mountpoint.display()
+                        ))
+                        .default(true)
+                        .interact()?
+                    {
+                        umount_archive(cfg, &active.mountpoint, current_pass.as_deref())?;
+                        println!("Unmounted {}", active.mountpoint.display());
+                    } else {
+                        continue;
+                    }
+                }
 
-            let item = match select_item(&items, &theme)? {
-                Some(i) => i,
-                None => break, // back to archive list
-            };
-
-            if Confirm::with_theme(&theme)
-                .with_prompt(format!(
-                    "Extract '{}' from '{}' to current directory?",
-                    item.path, archive.name
-                ))
-                .default(false)
-                .interact()?
-            {
-                let dest: String = Input::with_theme(&theme)
-                    .with_prompt("Destination directory")
-                    .default(".".to_string())
+                let default_mp = default_mountpoint(cfg, &archive.name);
+                let target: String = Input::with_theme(&theme)
+                    .with_prompt("Mountpoint")
+                    .default(default_mp.display().to_string())
                     .interact_text()?;
-                extract_file(
-                    cfg,
-                    &archive.name,
-                    &item.path,
-                    &dest,
-                    current_pass.as_deref(),
-                )?;
-                println!("Extracted to {}", dest);
+                let target_path = PathBuf::from(target);
+                mount_archive(cfg, &archive.name, &target_path, current_pass.as_deref())?;
+                println!("Mounted {} at {}", archive.name, target_path.display());
+                mount_state = Some(MountInfo {
+                    archive: archive.name.clone(),
+                    mountpoint: target_path,
+                });
             }
+            ArchiveAction::Back => {}
+            ArchiveAction::UnmountCurrent => {
+                if let Some(active) = mount_state.take() {
+                    umount_archive(cfg, &active.mountpoint, current_pass.as_deref())?;
+                    println!("Unmounted {}", active.mountpoint.display());
+                }
+            }
+        }
+    }
+}
+
+fn browse_files(
+    cfg: &Config,
+    archive: &BorgArchive,
+    passphrase: Option<&str>,
+    theme: &ColorfulTheme,
+) -> Result<()> {
+    loop {
+        let items = list_items(cfg, &archive.name, passphrase)?;
+        if items.is_empty() {
+            println!("No files in archive {}", archive.name);
+            return Ok(());
+        }
+
+        let item = match select_item(&items, theme)? {
+            Some(i) => i,
+            None => return Ok(()), // back to archive list
+        };
+
+        if Confirm::with_theme(theme)
+            .with_prompt(format!(
+                "Extract '{}' from '{}' to current directory?",
+                item.path, archive.name
+            ))
+            .default(false)
+            .interact()?
+        {
+            let dest: String = Input::with_theme(theme)
+                .with_prompt("Destination directory")
+                .default(".".to_string())
+                .interact_text()?;
+            extract_file(cfg, &archive.name, &item.path, &dest, passphrase)?;
+            println!("Extracted to {}", dest);
         }
     }
 }
