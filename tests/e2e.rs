@@ -159,9 +159,20 @@ fn e2e_mount_flow() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Skipping: borg not available in PATH");
         return Ok(());
     }
-    if !std::path::Path::new("/dev/fuse").exists() {
-        eprintln!("Skipping: /dev/fuse not available");
-        return Ok(());
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/fuse")
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("Skipping: /dev/fuse not available");
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!("Skipping: /dev/fuse not accessible ({e})");
+            return Ok(());
+        }
     }
 
     let temp = TempDir::new()?;
@@ -221,6 +232,7 @@ includes = ["{}"]
     let archive_name = &parsed.archives[0].name;
 
     let mountpoint = temp.path().join("mnt");
+    std::fs::create_dir_all(&mountpoint)?;
     let mut mount_cmd = Command::new(assert_cmd::cargo::cargo_bin!("borg-tool-rs"));
     apply_env(&mut mount_cmd, temp.path());
     mount_cmd
