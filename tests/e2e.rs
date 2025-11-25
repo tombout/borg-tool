@@ -5,6 +5,7 @@ use assert_cmd::prelude::*;
 use assert_fs::prelude::*;
 use predicates::str::contains;
 use serde::Deserialize;
+use tempfile::TempDir;
 
 // Helper structs to parse borg JSON output
 #[derive(Deserialize)]
@@ -23,6 +24,12 @@ fn ensure_borg_available() -> bool {
         .arg("--version")
         .output()
         .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
 }
 
@@ -138,5 +145,167 @@ includes = ["{}"]
         .stdout(contains("hello.txt"));
 
     temp.close()?;
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn e2e_mount_flow() -> Result<(), Box<dyn std::error::Error>> {
+    if !env_flag("BORG_TOOL_ENABLE_MOUNT_TESTS") {
+        eprintln!("Skipping mount test: BORG_TOOL_ENABLE_MOUNT_TESTS not set");
+        return Ok(());
+    }
+    if !ensure_borg_available() {
+        eprintln!("Skipping: borg not available in PATH");
+        return Ok(());
+    }
+    if !std::path::Path::new("/dev/fuse").exists() {
+        eprintln!("Skipping: /dev/fuse not available");
+        return Ok(());
+    }
+
+    let temp = TempDir::new()?;
+    let repo_path = temp.path().join("repo.borg");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir)?;
+    std::fs::write(data_dir.join("hello.txt"), b"hello mount")?;
+
+    let init = borg(
+        &["init", "--encryption", "none", repo_path.to_str().unwrap()],
+        temp.path(),
+    )
+    .status()?;
+    assert!(init.success(), "borg init failed");
+
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"borg_bin = "borg"
+probe_ssh = false
+
+[[repos]]
+name = "local"
+repo = "{}"
+
+[[repos.backups]]
+name = "test"
+includes = ["{}"]
+"#,
+            repo_path.display(),
+            data_dir.display()
+        ),
+    )?;
+
+    // Create archive via tool
+    let mut backup_cmd = Command::new(assert_cmd::cargo::cargo_bin!("borg-tool-rs"));
+    apply_env(&mut backup_cmd, temp.path());
+    backup_cmd
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--repo")
+        .arg("local")
+        .arg("backup")
+        .arg("test")
+        .assert()
+        .success();
+
+    // Get archive name via borg json
+    let output = borg(
+        &["list", "--json", repo_path.to_str().unwrap()],
+        temp.path(),
+    )
+    .output()?;
+    assert!(output.status.success());
+    let parsed: BorgListResponse = serde_json::from_slice(&output.stdout)?;
+    let archive_name = &parsed.archives[0].name;
+
+    let mountpoint = temp.path().join("mnt");
+    let mut mount_cmd = Command::new(assert_cmd::cargo::cargo_bin!("borg-tool-rs"));
+    apply_env(&mut mount_cmd, temp.path());
+    mount_cmd
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--repo")
+        .arg("local")
+        .arg("mount")
+        .arg(archive_name)
+        .arg("--target")
+        .arg(&mountpoint)
+        .assert()
+        .success();
+
+    // Read file through mount
+    let contents = std::fs::read_to_string(mountpoint.join("hello.txt"))?;
+    assert_eq!(contents, "hello mount");
+
+    let mut umount_cmd = Command::new(assert_cmd::cargo::cargo_bin!("borg-tool-rs"));
+    apply_env(&mut umount_cmd, temp.path());
+    umount_cmd
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--repo")
+        .arg("local")
+        .arg("umount")
+        .arg(&mountpoint)
+        .assert()
+        .success();
+
+    // After umount, directory should still exist but no longer be mounted; reading should fail.
+    let read_after = std::fs::read_to_string(mountpoint.join("hello.txt"));
+    assert!(
+        read_after.is_err(),
+        "mountpoint still readable after umount"
+    );
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn e2e_ssh_repo_list() -> Result<(), Box<dyn std::error::Error>> {
+    if !env_flag("BORG_TOOL_ENABLE_SSH_TESTS") {
+        eprintln!("Skipping SSH test: BORG_TOOL_ENABLE_SSH_TESTS not set");
+        return Ok(());
+    }
+    if !ensure_borg_available() {
+        eprintln!("Skipping: borg not available in PATH");
+        return Ok(());
+    }
+
+    let repo_url = match std::env::var("BORG_TOOL_SSH_REPO") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => {
+            eprintln!("Skipping SSH test: BORG_TOOL_SSH_REPO not provided");
+            return Ok(());
+        }
+    };
+
+    let temp = TempDir::new()?;
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"borg_bin = "borg"
+probe_ssh = true
+
+[[repos]]
+name = "remote"
+repo = "{}"
+"#,
+            repo_url
+        ),
+    )?;
+
+    let mut list_cmd = Command::new(assert_cmd::cargo::cargo_bin!("borg-tool-rs"));
+    apply_env(&mut list_cmd, temp.path());
+    list_cmd
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--repo")
+        .arg("remote")
+        .arg("list")
+        .assert();
+
     Ok(())
 }
