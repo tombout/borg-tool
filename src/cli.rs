@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "borg-tool",
     version,
-    about = "Minimal helper to inspect a Borg repository"
+    about = "Minimal helper to manage Borg backups (list, mount, browse, run presets)"
 )]
 pub struct Cli {
     /// Path to the config file
