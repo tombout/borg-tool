@@ -568,12 +568,11 @@ pub fn run_interactive(
                         .with_prompt("No backups configured. Create one now?")
                         .default(true)
                         .interact()?
+                        && let Some(new_preset) = setup_backup_preset_wizard(&repo, &theme)?
                     {
-                        if let Some(new_preset) = setup_backup_preset_wizard(&repo, &theme)? {
-                            add_preset_to_config(cfg, &repo.name, new_preset.clone());
-                            repo.backups.push(new_preset);
-                            maybe_save_config(cfg, config_path, &theme)?;
-                        }
+                        add_preset_to_config(cfg, &repo.name, new_preset.clone());
+                        repo.backups.push(new_preset);
+                        maybe_save_config(cfg, config_path, &theme)?;
                     }
                     continue;
                 }
@@ -664,16 +663,16 @@ pub fn browse_files(
 }
 
 fn migrate_legacy_repo(cfg: &mut Config) {
-    if cfg.repos.is_empty() {
-        if let Some(legacy) = cfg.repo.take() {
-            cfg.repos.push(RepoConfig {
-                name: "default".to_string(),
-                repo: legacy,
-                borg_bin: None,
-                mount_root: None,
-                backups: Vec::new(),
-            });
-        }
+    if cfg.repos.is_empty()
+        && let Some(legacy) = cfg.repo.take()
+    {
+        cfg.repos.push(RepoConfig {
+            name: "default".to_string(),
+            repo: legacy,
+            borg_bin: None,
+            mount_root: None,
+            backups: Vec::new(),
+        });
     }
 }
 
@@ -784,9 +783,7 @@ fn setup_new_repo_wizard(
     cfg.repos.push(RepoConfig {
         name: name.clone(),
         repo: repo_path,
-        borg_bin: if borg_bin_input == cfg.borg_bin {
-            None
-        } else if borg_bin_input == default_borg_bin() {
+        borg_bin: if borg_bin_input == cfg.borg_bin || borg_bin_input == default_borg_bin() {
             None
         } else {
             Some(borg_bin_input)
