@@ -12,3 +12,4 @@ toml = "0.8"
 rpassword = "7.3"
 dialoguer = "0.11"
 indicatif = "0.17"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

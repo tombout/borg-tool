@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use clap::{Parser, Subcommand};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -54,6 +55,11 @@ enum Commands {
     Umount {
         /// Mountpoint to unmount
         mountpoint: PathBuf,
+    },
+    /// Create a configured backup
+    Backup {
+        /// Backup configuration name; if omitted, you will be prompted
+        backup: Option<String>,
     },
 }
 
@@ -107,6 +113,9 @@ struct RepoConfig {
     borg_bin: Option<String>,
     /// Optional repo-specific mount root
     mount_root: Option<PathBuf>,
+    /// Optional backup presets for this repo
+    #[serde(default)]
+    backups: Vec<BackupConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +124,31 @@ struct RepoCtx {
     repo: String,
     borg_bin: String,
     mount_root: PathBuf,
+    backups: Vec<BackupConfig>,
     status: RepoStatus,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct BackupConfig {
+    /// Identifier used on the CLI
+    name: String,
+    /// Paths or patterns to include
+    includes: Vec<String>,
+    /// Paths or patterns to exclude
+    #[serde(default)]
+    excludes: Vec<String>,
+    /// Optional compression mode, e.g. "lz4" or "zstd,5"
+    #[serde(default)]
+    compression: Option<String>,
+    /// If true, stay on the same file system
+    #[serde(default)]
+    one_file_system: bool,
+    /// If true, add --exclude-caches
+    #[serde(default)]
+    exclude_caches: bool,
+    /// Archive name prefix (final name becomes "<prefix><name>-<timestamp>")
+    #[serde(default)]
+    archive_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +302,7 @@ fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
                     .mount_root
                     .clone()
                     .unwrap_or_else(|| cfg.mount_root.clone()),
+                backups: r.backups.clone(),
                 status: RepoStatus::Unknown,
             })
             .collect()
@@ -278,6 +312,7 @@ fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
             repo: repo.clone(),
             borg_bin: cfg.borg_bin.clone(),
             mount_root: cfg.mount_root.clone(),
+            backups: Vec::new(),
             status: RepoStatus::Unknown,
         }]
     } else {
@@ -352,7 +387,7 @@ fn select_repo_ctx(
 
     // interactive selection allowed only for interactive commands
     match cmd {
-        None | Some(Commands::Interactive) => {
+        None | Some(Commands::Interactive) | Some(Commands::Backup { .. }) => {
             let labels: Vec<String> = repos
                 .iter()
                 .map(|r| format!("{}  ({}) [{}]", r.name, r.repo, status_label(r.status)))
@@ -423,6 +458,9 @@ fn main() -> Result<()> {
         Some(Commands::Umount { mountpoint }) => {
             umount_archive(&repo_ctx, &mountpoint, passphrase.as_deref())?;
             println!("Unmounted {}", mountpoint.display());
+        }
+        Some(Commands::Backup { backup }) => {
+            run_backup(&repo_ctx, backup.as_deref(), passphrase.as_deref())?;
         }
     }
 
@@ -545,6 +583,21 @@ fn select_item(items: &[BorgItem], theme: &ColorfulTheme) -> Result<Option<BorgI
         .interact_opt()?;
 
     Ok(selection.map(|idx| items[idx].clone()))
+}
+
+fn select_backup(backups: &[BackupConfig], theme: &ColorfulTheme) -> Result<Option<BackupConfig>> {
+    let labels: Vec<String> = backups
+        .iter()
+        .map(|b| format!("{}  ({} includes)", b.name, b.includes.len()))
+        .collect();
+
+    let selection = Select::with_theme(theme)
+        .with_prompt("Choose backup preset (Esc/CTRL+C to quit)")
+        .items(&labels)
+        .default(0)
+        .interact_opt()?;
+
+    Ok(selection.map(|idx| backups[idx].clone()))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -791,6 +844,92 @@ fn ensure_passphrase(ctx: &RepoCtx) -> Result<Option<String>> {
     );
     let pass = prompt_password(prompt).context("Reading passphrase failed")?;
     Ok(Some(pass))
+}
+
+fn build_archive_name(preset: &BackupConfig, repo_name: &str) -> String {
+    let ts = Local::now().format("%Y%m%d-%H%M%S");
+    let mut segments = Vec::new();
+
+    if let Some(prefix) = preset.archive_prefix.as_deref() {
+        if !prefix.is_empty() {
+            segments.push(prefix.trim_end_matches(['-', '_']));
+        }
+    } else {
+        segments.push(repo_name);
+    }
+
+    segments.push(&preset.name);
+
+    format!("{}-{}", segments.join("-"), ts)
+}
+
+fn run_backup(ctx: &RepoCtx, backup_name: Option<&str>, passphrase: Option<&str>) -> Result<()> {
+    let theme = ColorfulTheme::default();
+
+    let preset = if ctx.backups.is_empty() {
+        anyhow::bail!("No backups configured for repo '{}'", ctx.name);
+    } else if let Some(name) = backup_name {
+        match ctx.backups.iter().find(|b| b.name == name) {
+            Some(b) => b.clone(),
+            None => {
+                let names: Vec<&str> = ctx.backups.iter().map(|b| b.name.as_str()).collect();
+                anyhow::bail!(
+                    "Backup '{}' not found for repo '{}'. Available: {}",
+                    name,
+                    ctx.name,
+                    names.join(", ")
+                );
+            }
+        }
+    } else {
+        match select_backup(&ctx.backups, &theme)? {
+            Some(b) => b,
+            None => return Ok(()),
+        }
+    };
+
+    if preset.includes.is_empty() {
+        anyhow::bail!("Backup '{}' has no includes configured", preset.name);
+    }
+
+    let archive_name = build_archive_name(&preset, &ctx.name);
+    println!("Creating archive '{}' in repo {}", archive_name, ctx.repo);
+
+    let mut cmd = Command::new(&ctx.borg_bin);
+    cmd.arg("create");
+
+    if let Some(comp) = &preset.compression {
+        cmd.args(["--compression", comp]);
+    }
+    if preset.one_file_system {
+        cmd.arg("--one-file-system");
+    }
+    if preset.exclude_caches {
+        cmd.arg("--exclude-caches");
+    }
+    for pat in &preset.excludes {
+        cmd.args(["--exclude", pat]);
+    }
+
+    cmd.arg(format!("{}::{}", ctx.repo, archive_name));
+    for inc in &preset.includes {
+        cmd.arg(inc);
+    }
+
+    if let Some(pass) = passphrase {
+        cmd.env("BORG_PASSPHRASE", pass);
+    }
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
+
+    if !status.success() {
+        anyhow::bail!("borg create failed with status {}", status);
+    }
+
+    println!("Backup '{}' completed", archive_name);
+    Ok(())
 }
 
 fn run_interactive(repo: &RepoCtx, passphrase: Option<String>) -> Result<()> {
