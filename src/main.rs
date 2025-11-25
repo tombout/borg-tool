@@ -117,6 +117,8 @@ struct RepoCtx {
 enum RepoStatus {
     Ok,
     MissingLocal,
+    RemoteOk,
+    RemoteAuthNeeded,
     Unknown,
 }
 
@@ -152,7 +154,7 @@ fn default_config_path() -> PathBuf {
 
 fn repo_status(repo: &str) -> RepoStatus {
     if repo.contains("://") || (repo.contains('@') && repo.contains(':')) {
-        return RepoStatus::Unknown; // remote, don't probe
+        return probe_remote(repo);
     }
 
     let path = Path::new(repo);
@@ -160,6 +162,62 @@ fn repo_status(repo: &str) -> RepoStatus {
         RepoStatus::Ok
     } else {
         RepoStatus::MissingLocal
+    }
+}
+
+fn extract_ssh_host(repo: &str) -> Option<String> {
+    if let Some(rest) = repo.strip_prefix("ssh://") {
+        let host_part = rest.split('/').next().unwrap_or(rest);
+        let host_port = host_part.split('@').last().unwrap_or(host_part);
+        // drop possible path after colon for scp-like paths inside ssh:// already handled above
+        let host = host_port.split(':').next().unwrap_or(host_port);
+        return Some(host.to_string());
+    }
+
+    // scp-like syntax user@host:/path or user@host:repo
+    if repo.contains('@') && repo.contains(':') {
+        let after_at = repo.split('@').nth(1)?;
+        let host = after_at.split(':').next().unwrap_or(after_at);
+        return Some(host.to_string());
+    }
+
+    None
+}
+
+fn probe_remote(repo: &str) -> RepoStatus {
+    let Some(host) = extract_ssh_host(repo) else {
+        return RepoStatus::Unknown;
+    };
+
+    let output = Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=5",
+            &host,
+            "true",
+        ])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => RepoStatus::RemoteOk,
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+            if stderr.contains("permission denied")
+                || stderr.contains("publickey")
+                || stderr.contains("password")
+            {
+                RepoStatus::RemoteAuthNeeded
+            } else {
+                RepoStatus::Unknown
+            }
+        }
+        Err(_) => RepoStatus::Unknown,
     }
 }
 
@@ -590,8 +648,8 @@ fn ensure_mount_available(ctx: &RepoCtx) -> Result<bool> {
 }
 
 fn ensure_repo_available(repo: RepoCtx, cmd: Option<&Commands>) -> Result<RepoCtx> {
-    if repo.status == RepoStatus::MissingLocal {
-        match cmd {
+    match repo.status {
+        RepoStatus::MissingLocal => match cmd {
             None | Some(Commands::Interactive) => {
                 println!(
                     "Warning: repo '{}' path '{}' not found.",
@@ -601,7 +659,22 @@ fn ensure_repo_available(repo: RepoCtx, cmd: Option<&Commands>) -> Result<RepoCt
             _ => {
                 anyhow::bail!("Repo '{}' path '{}' not found.", repo.name, repo.repo);
             }
-        }
+        },
+        RepoStatus::RemoteAuthNeeded => match cmd {
+            None | Some(Commands::Interactive) => {
+                println!(
+                    "Warning: repo '{}' seems to require SSH auth (no key?).",
+                    repo.name
+                );
+            }
+            _ => {
+                println!(
+                    "Warning: repo '{}' may require SSH auth; proceeding.",
+                    repo.name
+                );
+            }
+        },
+        _ => {}
     }
     Ok(repo)
 }
@@ -610,6 +683,8 @@ fn status_label(status: RepoStatus) -> &'static str {
     match status {
         RepoStatus::Ok => "ok",
         RepoStatus::MissingLocal => "missing",
+        RepoStatus::RemoteOk => "remote-ok",
+        RepoStatus::RemoteAuthNeeded => "remote-auth?",
         RepoStatus::Unknown => "remote?",
     }
 }
