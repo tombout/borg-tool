@@ -178,8 +178,7 @@ pub fn mount_archive(
     with_spinner(
         &format!("Mounting {} to {}", archive, mountpoint.display()),
         |_pb| {
-            fs::create_dir_all(mountpoint)
-                .with_context(|| format!("Create mountpoint {}", mountpoint.display()))?;
+            ensure_mountpoint_ready(mountpoint)?;
 
             let output = run_borg(ctx, passphrase, |cmd| {
                 cmd.args([
@@ -194,6 +193,29 @@ pub fn mount_archive(
             Ok(())
         },
     )
+}
+
+fn ensure_mountpoint_ready(path: &Path) -> Result<()> {
+    if path.exists() {
+        if !path.is_dir() {
+            anyhow::bail!(
+                "Mountpoint {} exists and is not a directory",
+                path.display()
+            );
+        }
+        let mut entries =
+            fs::read_dir(path).with_context(|| format!("Reading mountpoint {}", path.display()))?;
+        if entries.next().is_some() {
+            anyhow::bail!(
+                "Mountpoint {} is not empty; choose an empty directory",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    fs::create_dir_all(path).with_context(|| format!("Create mountpoint {}", path.display()))?;
+    Ok(())
 }
 
 pub fn umount_archive(ctx: &RepoCtx, mountpoint: &Path, passphrase: Option<&str>) -> Result<()> {

@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Generate checksums
+        run: |
+          cd target/release
+          sha256sum borg-tool-rs > SHA256SUMS
+
+      - name: Install cyclonedx-cargo
+        run: cargo install cyclonedx-cargo --locked
+
+      - name: Generate SBOM
+        run: cyclonedx-cargo --output-format json --output-file sbom.json
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/borg-tool-rs
+            target/release/SHA256SUMS
+            sbom.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -50,6 +50,15 @@ cargo run -- --repo local backup <preset>
 - Optional jobs (gate via repo variables):
   - `ENABLE_MOUNT_E2E=1` enables the mount test (Linux + FUSE required).
   - `ENABLE_SSH_E2E=1` enables the SSH test; expects secret `BORG_TOOL_SSH_REPO`.
+- Security checks: `cargo audit` and `cargo deny` run in CI.
+- CodeQL runs on push/PR and weekly.
+
+## Release process
+1) Local preflight: `cargo fmt && cargo clippy --all-targets --all-features && cargo test && cargo audit && cargo deny check`.
+2) Build: `cargo build --release` (binary at `target/release/borg-tool-rs`).
+3) Checksums: `cd target/release && sha256sum borg-tool-rs > SHA256SUMS`.
+4) SBOM (optional but recommended): `cargo install cyclonedx-cargo --locked && cyclonedx-cargo --output-format json --output-file sbom.json`.
+5) Tag and push (`vX.Y.Z`); GitHub Actions release workflow builds, generates checksum + SBOM, and uploads artifacts automatically.
 
 ## Config notes
 - Interactive repo/backup wizards can create entries and save the config (comments are lost on save).
