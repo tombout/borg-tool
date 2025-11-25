@@ -7,7 +7,7 @@ Concise rules for working on any Rust code in this repo. Favor correctness, clar
 ## Commands You Should Run
 - Build / check: `cargo check` for fast iteration; `cargo build` before pushing.
 - Tests: `cargo test` (or `cargo test <name>` to scope). Keep tests fast and deterministic.
-- Lints & fmt: `cargo fmt` then `cargo clippy --all-targets --all-features` before shipping changes.
+- Lints & fmt: `cargo fmt` then `cargo clippy --all-targets --all-features` **before every commit**.
 - Run binary: `cargo run -- <args>` (avoid hard‑coding secrets in args).
 - Add crates: edit `Cargo.toml`, then `cargo check` to verify the lockfile change.
 
