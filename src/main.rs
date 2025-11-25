@@ -153,6 +153,7 @@ fn main() -> Result<()> {
             print_items(&items);
         }
         Some(Commands::Mount { archive, target }) => {
+            ensure_mount_available(&config)?;
             let mountpoint = target.unwrap_or_else(|| default_mountpoint(&config, &archive));
             mount_archive(&config, &archive, &mountpoint, passphrase.as_deref())?;
             println!("Mounted {} at {}", archive, mountpoint.display());
@@ -282,8 +283,15 @@ enum ArchiveAction {
     Back,
 }
 
-fn select_archive_action(theme: &ColorfulTheme, has_mount: bool) -> Result<ArchiveAction> {
-    let mut options = vec!["Browse files", "Mount"];
+fn select_archive_action(
+    theme: &ColorfulTheme,
+    has_mount: bool,
+    mount_available: bool,
+) -> Result<ArchiveAction> {
+    let mut options = vec!["Browse files"];
+    if mount_available {
+        options.push("Mount");
+    }
     if has_mount {
         options.push("Unmount current");
     }
@@ -418,6 +426,31 @@ fn default_mountpoint(cfg: &Config, archive: &str) -> PathBuf {
     cfg.mount_root.join(archive)
 }
 
+fn ensure_mount_available(cfg: &Config) -> Result<bool> {
+    let output = Command::new(&cfg.borg_bin)
+        .args(["mount", "--help"])
+        .output()
+        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_lowercase();
+
+    if combined.contains("no fuse support") {
+        return Ok(false);
+    }
+
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    // fallback: assume available to avoid false negatives
+    Ok(true)
+}
+
 fn ensure_passphrase(cfg: &Config) -> Result<Option<String>> {
     if env::var("BORG_PASSCOMMAND").is_ok() || env::var("BORG_PASSPHRASE").is_ok() {
         return Ok(None);
@@ -435,6 +468,7 @@ fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
     let theme = ColorfulTheme::default();
     let current_pass = passphrase;
     let mut mount_state: Option<MountInfo> = None;
+    let mount_available = ensure_mount_available(cfg).unwrap_or(false);
 
     loop {
         let archives = list_archives(cfg, current_pass.as_deref())?;
@@ -443,7 +477,9 @@ fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
             return Ok(());
         }
 
-        if let Some(m) = &mount_state {
+        if !mount_available {
+            println!("(Mount unavailable: no FUSE support detected)");
+        } else if let Some(m) = &mount_state {
             println!("Mounted: {} @ {}", m.archive, m.mountpoint.display());
         }
 
@@ -452,7 +488,7 @@ fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
             None => return Ok(()),
         };
 
-        match select_archive_action(&theme, mount_state.is_some())? {
+        match select_archive_action(&theme, mount_state.is_some(), mount_available)? {
             ArchiveAction::Browse => {
                 browse_files(cfg, &archive, current_pass.as_deref(), &theme)?;
             }
