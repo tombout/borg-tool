@@ -1,6 +1,6 @@
 target/
 .cargo/
-borg-tool.toml
+config.toml
 
 # Editor/OS
 *.swp
