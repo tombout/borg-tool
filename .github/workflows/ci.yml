@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests (unit + default E2E)
+        run: cargo test
+
+  e2e-mount:
+    if: ${{ vars.ENABLE_MOUNT_E2E == '1' }}
+    runs-on: ubuntu-latest
+    env:
+      BORG_TOOL_ENABLE_MOUNT_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install borg & fuse3
+        run: sudo apt-get update && sudo apt-get install -y borgbackup fuse3
+      - name: Allow fuse
+        run: sudo modprobe fuse || true
+      - uses: Swatinem/rust-cache@v2
+      - name: Mount E2E (ignored test)
+        run: cargo test e2e_mount_flow -- --ignored
+
+  e2e-ssh:
+    if: ${{ vars.ENABLE_SSH_E2E == '1' && secrets.BORG_TOOL_SSH_REPO != '' }}
+    runs-on: ubuntu-latest
+    env:
+      BORG_TOOL_ENABLE_SSH_TESTS: "1"
+      BORG_TOOL_SSH_REPO: ${{ secrets.BORG_TOOL_SSH_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install borg
+        run: sudo apt-get update && sudo apt-get install -y borgbackup
+      - uses: Swatinem/rust-cache@v2
+      - name: SSH E2E (ignored test)
+        run: cargo test e2e_ssh_repo_list -- --ignored
