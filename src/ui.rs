@@ -22,6 +22,7 @@ pub enum ArchiveAction {
 pub enum MainAction {
     Archives,
     Backups,
+    BackRepo,
     Quit,
 }
 
@@ -130,7 +131,7 @@ pub fn select_archive_action(
 }
 
 pub fn select_main_action(theme: &ColorfulTheme) -> Result<MainAction> {
-    let options = ["Archives", "Backups", "Quit"];
+    let options = ["Archives", "Backups", "Change repository", "Quit"];
     let choice = Select::with_theme(theme)
         .with_prompt("What do you want to do?")
         .items(&options)
@@ -140,9 +141,16 @@ pub fn select_main_action(theme: &ColorfulTheme) -> Result<MainAction> {
     let action = match choice {
         Some(0) => MainAction::Archives,
         Some(1) => MainAction::Backups,
+        Some(2) => MainAction::BackRepo,
         _ => MainAction::Quit,
     };
     Ok(action)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractiveOutcome {
+    Quit,
+    ChangeRepo,
 }
 
 pub fn select_repo_ctx(
@@ -370,7 +378,10 @@ fn ensure_repo_available(repo: RepoCtx, cmd: Option<&crate::cli::Commands>) -> R
     Ok(repo)
 }
 
-pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) -> Result<()> {
+pub fn run_interactive(
+    repo: &RepoCtx,
+    passphrase_cache: &mut Option<String>,
+) -> Result<InteractiveOutcome> {
     let theme = dialog_theme();
     let mut mount_state: Option<MountInfo> = None;
     let mount_available = ensure_mount_available(repo).unwrap_or(false);
@@ -527,7 +538,8 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
                     println!("Backup failed: {err}");
                 }
             }
-            MainAction::Quit => return Ok(()),
+            MainAction::BackRepo => return Ok(InteractiveOutcome::ChangeRepo),
+            MainAction::Quit => return Ok(InteractiveOutcome::Quit),
         }
     }
 }

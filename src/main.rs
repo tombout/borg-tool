@@ -15,25 +15,30 @@ fn main() -> Result<()> {
     })?;
 
     let theme = ui::dialog_theme();
-    let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
-
     let mut passphrase_cache: Option<String> = None;
 
     match cmd {
-        None => ui::run_interactive(&repo_ctx, &mut passphrase_cache)?,
-        Some(cli::Commands::Interactive) => ui::run_interactive(&repo_ctx, &mut passphrase_cache)?,
+        None | Some(cli::Commands::Interactive) => loop {
+            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
+            match ui::run_interactive(&repo_ctx, &mut passphrase_cache)? {
+                ui::InteractiveOutcome::Quit => break,
+                ui::InteractiveOutcome::ChangeRepo => continue,
+            }
+        },
         Some(cli::Commands::List) => {
+            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             let archives = borg::list_archives(&repo_ctx, pass.as_deref())?;
             ui::print_archives(&archives);
         }
-        Some(cli::Commands::Files { archive }) => {
+        Some(cli::Commands::Files { ref archive }) => {
+            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             let archives = borg::list_archives(&repo_ctx, pass.as_deref())?;
             let selected = match archive {
                 Some(name) => archives
                     .iter()
-                    .find(|a| a.name == name)
+                    .find(|a| a.name == *name)
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("Archive '{}' not found", name))?,
                 None => match ui::select_archive(&archives, &theme)? {
@@ -44,26 +49,33 @@ fn main() -> Result<()> {
             let items = borg::list_items(&repo_ctx, &selected.name, pass.as_deref())?;
             ui::print_items(&items);
         }
-        Some(cli::Commands::Mount { archive, target }) => {
+        Some(cli::Commands::Mount {
+            ref archive,
+            ref target,
+        }) => {
+            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
             borg::ensure_mount_available(&repo_ctx)?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
-            let mountpoint =
-                target.unwrap_or_else(|| borg::default_mountpoint(&repo_ctx, &archive));
-            borg::mount_archive(&repo_ctx, &archive, &mountpoint, pass.as_deref())?;
+            let mountpoint = target
+                .clone()
+                .unwrap_or_else(|| borg::default_mountpoint(&repo_ctx, archive));
+            borg::mount_archive(&repo_ctx, archive, &mountpoint, pass.as_deref())?;
             println!("Mounted {} at {}", archive, mountpoint.display());
         }
-        Some(cli::Commands::Umount { mountpoint }) => {
+        Some(cli::Commands::Umount { ref mountpoint }) => {
+            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             borg::umount_archive(&repo_ctx, &mountpoint, pass.as_deref())?;
             println!("Unmounted {}", mountpoint.display());
         }
-        Some(cli::Commands::Backup { backup }) => {
+        Some(cli::Commands::Backup { ref backup }) => {
+            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             let preset = if let Some(name) = backup {
                 repo_ctx
                     .backups
                     .iter()
-                    .find(|b| b.name == name)
+                    .find(|b| b.name == *name)
                     .cloned()
                     .ok_or_else(|| {
                         let names: Vec<&str> =
