@@ -418,7 +418,7 @@ fn main() -> Result<()> {
     let cmd = cli.command;
 
     let (config, _config_path) = load_config_resolved(cli.config).with_context(|| {
-        "Failed to load config (searched default path and ./borg-tool.toml when unset)".to_string()
+        "Failed to load config (searched default path and ./config.toml when unset)".to_string()
     })?;
 
     let theme = ColorfulTheme::default();
@@ -487,7 +487,7 @@ fn load_config_resolved(cli_path: Option<PathBuf>) -> Result<(Config, PathBuf)> 
     }
 
     let default_path = default_config_path();
-    let fallback_path = PathBuf::from("borg-tool.toml");
+    let fallback_path = PathBuf::from("config.toml");
     let candidates = [default_path.clone(), fallback_path.clone()];
     let mut last_not_found: Option<(PathBuf, anyhow::Error)> = None;
 
