@@ -58,6 +58,13 @@ fn show_step(title: &str, lines: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn show_error_and_wait(message: &str) {
+    let term = Term::stdout();
+    let _ = term.write_line(message);
+    let _ = term.write_line("Press Enter to continue...");
+    let _ = term.read_line();
+}
+
 fn show_step_with_ctx(
     title: &str,
     lines: &[String],
@@ -539,7 +546,7 @@ pub fn run_interactive(
                     None => continue,
                 };
                 if let Err(err) = run_backup(repo, &preset, pass.as_deref()) {
-                    println!("Backup failed: {err}");
+                    show_error_and_wait(&format!("Backup failed: {err}"));
                 }
             }
             MainAction::BackRepo => return Ok(InteractiveOutcome::ChangeRepo),

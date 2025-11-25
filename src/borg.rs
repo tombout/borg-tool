@@ -327,12 +327,23 @@ pub fn run_backup(ctx: &RepoCtx, preset: &BackupConfig, passphrase: Option<&str>
             cmd.env("BORG_PASSPHRASE", pass);
         }
 
-        let status = cmd
-            .status()
+        let output = cmd
+            .output()
             .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
 
-        if !status.success() {
-            anyhow::bail!("borg create failed with status {}", status);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let hint = if stderr.to_lowercase().contains("permission denied") {
+                " (hint: run with sudo for system paths)"
+            } else {
+                ""
+            };
+            anyhow::bail!(
+                "borg create failed with status {}: {}{}",
+                output.status,
+                stderr.trim(),
+                hint
+            );
         }
 
         Ok(())
