@@ -423,18 +423,19 @@ fn main() -> Result<()> {
     let theme = ColorfulTheme::default();
     let repo_ctx = select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
 
-    // Prompt passphrase once if needed; reused for subsequent borg calls.
-    let passphrase = ensure_passphrase(&repo_ctx)?;
+    let mut passphrase_cache: Option<String> = None;
 
     match cmd {
-        None => run_interactive(&repo_ctx, passphrase)?,
-        Some(Commands::Interactive) => run_interactive(&repo_ctx, passphrase)?,
+        None => run_interactive(&repo_ctx, &mut passphrase_cache)?,
+        Some(Commands::Interactive) => run_interactive(&repo_ctx, &mut passphrase_cache)?,
         Some(Commands::List) => {
-            let archives = list_archives(&repo_ctx, passphrase.as_deref())?;
+            let pass = ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
+            let archives = list_archives(&repo_ctx, pass.as_deref())?;
             print_archives(&archives);
         }
         Some(Commands::Files { archive }) => {
-            let archives = list_archives(&repo_ctx, passphrase.as_deref())?;
+            let pass = ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
+            let archives = list_archives(&repo_ctx, pass.as_deref())?;
             let selected = match archive {
                 Some(name) => archives
                     .iter()
@@ -446,21 +447,24 @@ fn main() -> Result<()> {
                     None => return Ok(()),
                 },
             };
-            let items = list_items(&repo_ctx, &selected.name, passphrase.as_deref())?;
+            let items = list_items(&repo_ctx, &selected.name, pass.as_deref())?;
             print_items(&items);
         }
         Some(Commands::Mount { archive, target }) => {
             ensure_mount_available(&repo_ctx)?;
+            let pass = ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             let mountpoint = target.unwrap_or_else(|| default_mountpoint(&repo_ctx, &archive));
-            mount_archive(&repo_ctx, &archive, &mountpoint, passphrase.as_deref())?;
+            mount_archive(&repo_ctx, &archive, &mountpoint, pass.as_deref())?;
             println!("Mounted {} at {}", archive, mountpoint.display());
         }
         Some(Commands::Umount { mountpoint }) => {
-            umount_archive(&repo_ctx, &mountpoint, passphrase.as_deref())?;
+            let pass = ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
+            umount_archive(&repo_ctx, &mountpoint, pass.as_deref())?;
             println!("Unmounted {}", mountpoint.display());
         }
         Some(Commands::Backup { backup }) => {
-            run_backup(&repo_ctx, backup.as_deref(), passphrase.as_deref())?;
+            let pass = ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
+            run_backup(&repo_ctx, backup.as_deref(), pass.as_deref())?;
         }
     }
 
@@ -869,6 +873,13 @@ fn ensure_passphrase(ctx: &RepoCtx) -> Result<Option<String>> {
     Ok(Some(pass))
 }
 
+fn ensure_passphrase_cached(cached: &mut Option<String>, ctx: &RepoCtx) -> Result<Option<String>> {
+    if cached.is_none() {
+        *cached = ensure_passphrase(ctx)?;
+    }
+    Ok(cached.clone())
+}
+
 fn build_archive_name(preset: &BackupConfig, repo_name: &str) -> String {
     let ts = Local::now().format("%Y%m%d-%H%M%S");
     let mut segments = Vec::new();
@@ -955,16 +966,16 @@ fn run_backup(ctx: &RepoCtx, backup_name: Option<&str>, passphrase: Option<&str>
     Ok(())
 }
 
-fn run_interactive(repo: &RepoCtx, passphrase: Option<String>) -> Result<()> {
+fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) -> Result<()> {
     let theme = ColorfulTheme::default();
-    let current_pass = passphrase;
     let mut mount_state: Option<MountInfo> = None;
     let mount_available = ensure_mount_available(repo).unwrap_or(false);
 
     loop {
         match select_main_action(&theme)? {
             MainAction::Archives => {
-                let archives = list_archives(repo, current_pass.as_deref())?;
+                let pass = ensure_passphrase_cached(passphrase_cache, repo)?;
+                let archives = list_archives(repo, pass.as_deref())?;
                 if archives.is_empty() {
                     println!("No archives found");
                     continue;
@@ -983,7 +994,7 @@ fn run_interactive(repo: &RepoCtx, passphrase: Option<String>) -> Result<()> {
 
                 match select_archive_action(&theme, mount_state.is_some(), mount_available)? {
                     ArchiveAction::Browse => {
-                        browse_files(repo, &archive, current_pass.as_deref(), &theme)?;
+                        browse_files(repo, &archive, pass.as_deref(), &theme)?;
                     }
                     ArchiveAction::Mount => {
                         if let Some(active) = &mount_state {
@@ -995,7 +1006,7 @@ fn run_interactive(repo: &RepoCtx, passphrase: Option<String>) -> Result<()> {
                                 .default(true)
                                 .interact()?
                             {
-                                umount_archive(repo, &active.mountpoint, current_pass.as_deref())?;
+                                umount_archive(repo, &active.mountpoint, pass.as_deref())?;
                                 println!("Unmounted {}", active.mountpoint.display());
                             } else {
                                 continue;
@@ -1008,7 +1019,7 @@ fn run_interactive(repo: &RepoCtx, passphrase: Option<String>) -> Result<()> {
                             .default(default_mp.display().to_string())
                             .interact_text()?;
                         let target_path = PathBuf::from(target);
-                        mount_archive(repo, &archive.name, &target_path, current_pass.as_deref())?;
+                        mount_archive(repo, &archive.name, &target_path, pass.as_deref())?;
                         println!("Mounted {} at {}", archive.name, target_path.display());
                         mount_state = Some(MountInfo {
                             archive: archive.name.clone(),
@@ -1018,14 +1029,15 @@ fn run_interactive(repo: &RepoCtx, passphrase: Option<String>) -> Result<()> {
                     ArchiveAction::Back => {}
                     ArchiveAction::UnmountCurrent => {
                         if let Some(active) = mount_state.take() {
-                            umount_archive(repo, &active.mountpoint, current_pass.as_deref())?;
+                            umount_archive(repo, &active.mountpoint, pass.as_deref())?;
                             println!("Unmounted {}", active.mountpoint.display());
                         }
                     }
                 }
             }
             MainAction::Backups => {
-                if let Err(err) = run_backup(repo, None, current_pass.as_deref()) {
+                let pass = ensure_passphrase_cached(passphrase_cache, repo)?;
+                if let Err(err) = run_backup(repo, None, pass.as_deref()) {
                     println!("Backup failed: {err}");
                 }
             }

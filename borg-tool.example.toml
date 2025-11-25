@@ -8,14 +8,14 @@ repo = "ssh://raspi-local/mnt/extern/borg-repo"
 # borg_bin = "/usr/local/bin/borg" # optional per-repo
 # mount_root = "/tmp/borg-raspi"
 
-  [[repos.backups]]
-  name = "home"
-  includes = ["/home"]
-  excludes = ["/home/*/.cache", "/home/*/.cargo"]
-  compression = "zstd,6" # optional
-  one_file_system = true    # optional
-  exclude_caches = true     # optional
-  # archive_prefix = "raspi" # optional, defaults to repo name
+[[repos.backups]]
+name = "home"
+includes = ["/home"]
+excludes = ["/home/*/.cache", "/home/*/.cargo"]
+compression = "zstd,6" # optional
+one_file_system = true    # optional
+exclude_caches = true     # optional
+# archive_prefix = "raspi" # optional, defaults to repo name
 
 [[repos]]
 name = "laptop"
