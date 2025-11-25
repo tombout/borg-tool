@@ -1,5 +1,7 @@
 # borg-tool-rs
 
+![CI](https://github.com/tombout/borg-tool-rs/actions/workflows/ci.yml/badge.svg)
+
 Small Rust CLI to inspect Borg repositories, mount archives, and run backups from presets — interactively or scripted.
 
 ## Requirements
