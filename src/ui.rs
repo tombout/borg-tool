@@ -145,7 +145,7 @@ pub fn select_main_action(theme: &ColorfulTheme) -> Result<MainAction> {
     let options = ["Archives", "Backups", "Change repository", "Quit"];
     let choice = Select::with_theme(theme)
         .with_prompt("What do you want to do?")
-        .items(&options)
+        .items(options)
         .default(0)
         .interact_opt()?;
 
@@ -731,7 +731,7 @@ fn setup_new_repo_wizard(
     let enc_options = ["repokey (encrypted, recommended)", "none (no encryption)"];
     let enc_choice = Select::with_theme(theme)
         .with_prompt("Encryption mode")
-        .items(&enc_options)
+        .items(enc_options)
         .default(0)
         .interact_opt()?;
     let encryption = match enc_choice.unwrap_or(0) {
