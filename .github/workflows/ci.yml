@@ -26,6 +26,12 @@ jobs:
       - name: Tests (unit + default E2E)
         run: cargo test
 
+      - name: Cargo audit
+        run: cargo install cargo-audit --locked && cargo audit
+
+      - name: Cargo deny
+        run: cargo install cargo-deny --locked && cargo deny check
+
   e2e-mount:
     if: ${{ vars.ENABLE_MOUNT_E2E == '1' }}
     runs-on: ubuntu-latest

@@ -20,3 +20,6 @@ assert_fs = "1.1"
 predicates = "3.1"
 serde_json = "1.0"
 tempfile = "3.10"
+
+[patch.crates-io]
+# Avoid accidental yanked transitive pulls; can be extended if needed.
