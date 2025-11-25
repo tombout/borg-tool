@@ -40,11 +40,11 @@ jobs:
           cp "$release_dir/borg-tool-rs" "$release_dir/borg-tool-rs-${{ matrix.target }}"
           (cd "$release_dir" && sha256sum "borg-tool-rs-${{ matrix.target }}" > "SHA256SUMS-${{ matrix.target }}")
 
-      - name: Install cyclonedx-cargo
-        run: cargo install cyclonedx-cargo --locked
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
 
       - name: Generate SBOM
-        run: cyclonedx-cargo --output-format json --output-file sbom-${{ matrix.target }}.json
+        run: cargo cyclonedx -f json --all > sbom-${{ matrix.target }}.json
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
