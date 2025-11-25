@@ -10,35 +10,53 @@ fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     let cmd = cli.command;
 
-    let (config, _config_path) = config::load_config_resolved(cli.config).with_context(|| {
-        "Failed to load config (searched default path and ./config.toml when unset)".to_string()
-    })?;
+    let (mut config, config_path) =
+        config::load_config_resolved(cli.config).with_context(|| {
+            "Failed to load config (searched default path and ./config.toml when unset)".to_string()
+        })?;
 
     let theme = ui::dialog_theme();
     let mut passphrase_cache: Option<String> = None;
 
     match cmd {
         None | Some(cli::Commands::Interactive) => loop {
-            let repo_ctx =
-                match ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)? {
-                    Some(r) => r,
-                    None => break,
-                };
-            match ui::run_interactive(&repo_ctx, &mut passphrase_cache)? {
+            let repo_ctx = match ui::select_repo_ctx(
+                &mut config,
+                &config_path,
+                cli.repo.as_deref(),
+                cmd.as_ref(),
+                &theme,
+            )? {
+                Some(r) => r,
+                None => break,
+            };
+            match ui::run_interactive(&mut config, &config_path, repo_ctx, &mut passphrase_cache)? {
                 ui::InteractiveOutcome::Quit => break,
                 ui::InteractiveOutcome::ChangeRepo => continue,
             }
         },
         Some(cli::Commands::List) => {
-            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?
-                .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
+            let repo_ctx = ui::select_repo_ctx(
+                &mut config,
+                &config_path,
+                cli.repo.as_deref(),
+                cmd.as_ref(),
+                &theme,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             let archives = borg::list_archives(&repo_ctx, pass.as_deref())?;
             ui::print_archives(&archives);
         }
         Some(cli::Commands::Files { ref archive }) => {
-            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?
-                .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
+            let repo_ctx = ui::select_repo_ctx(
+                &mut config,
+                &config_path,
+                cli.repo.as_deref(),
+                cmd.as_ref(),
+                &theme,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             let archives = borg::list_archives(&repo_ctx, pass.as_deref())?;
             let selected = match archive {
@@ -59,8 +77,14 @@ fn main() -> Result<()> {
             ref archive,
             ref target,
         }) => {
-            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?
-                .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
+            let repo_ctx = ui::select_repo_ctx(
+                &mut config,
+                &config_path,
+                cli.repo.as_deref(),
+                cmd.as_ref(),
+                &theme,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
             borg::ensure_mount_available(&repo_ctx)?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             let mountpoint = target
@@ -70,15 +94,27 @@ fn main() -> Result<()> {
             println!("Mounted {} at {}", archive, mountpoint.display());
         }
         Some(cli::Commands::Umount { ref mountpoint }) => {
-            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?
-                .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
+            let repo_ctx = ui::select_repo_ctx(
+                &mut config,
+                &config_path,
+                cli.repo.as_deref(),
+                cmd.as_ref(),
+                &theme,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             borg::umount_archive(&repo_ctx, mountpoint, pass.as_deref())?;
             println!("Unmounted {}", mountpoint.display());
         }
         Some(cli::Commands::Backup { ref backup }) => {
-            let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?
-                .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
+            let repo_ctx = ui::select_repo_ctx(
+                &mut config,
+                &config_path,
+                cli.repo.as_deref(),
+                cmd.as_ref(),
+                &theme,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
             let preset = if let Some(name) = backup {
                 repo_ctx
@@ -97,8 +133,8 @@ fn main() -> Result<()> {
                     })?
             } else {
                 match ui::select_backup(&repo_ctx.backups, &theme)? {
-                    Some(p) => p,
-                    None => return Ok(()),
+                    ui::BackupChoice::Preset(p) => p,
+                    _ => return Ok(()),
                 }
             };
 

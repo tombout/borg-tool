@@ -1,14 +1,19 @@
-use std::{env, fs, io::ErrorKind, path::PathBuf};
+use std::{
+    env, fs,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     /// Repositories (preferred, supports multiple)
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
     /// Legacy single repo (fallback)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     /// Global borg binary default
     #[serde(default = "default_borg_bin")]
@@ -21,21 +26,23 @@ pub struct Config {
     pub probe_ssh: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RepoConfig {
     pub name: String,
     /// Path/URL of the Borg repository
     pub repo: String,
     /// Optional repo-specific borg binary
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub borg_bin: Option<String>,
     /// Optional repo-specific mount root
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mount_root: Option<PathBuf>,
     /// Optional backup presets for this repo
     #[serde(default)]
     pub backups: Vec<BackupConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BackupConfig {
     /// Identifier used on the CLI
     pub name: String,
@@ -46,6 +53,7 @@ pub struct BackupConfig {
     pub excludes: Vec<String>,
     /// Optional compression mode, e.g. "lz4" or "zstd,5"
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub compression: Option<String>,
     /// If true, stay on the same file system
     #[serde(default)]
@@ -55,6 +63,7 @@ pub struct BackupConfig {
     pub exclude_caches: bool,
     /// Archive name prefix (final name becomes "<prefix><name>-<timestamp>")
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_prefix: Option<String>,
 }
 
@@ -163,4 +172,15 @@ pub fn status_label(status: RepoStatus) -> &'static str {
         RepoStatus::RemoteAuthNeeded => "remote-auth?",
         RepoStatus::Unknown => "remote?",
     }
+}
+
+pub fn save_config(cfg: &Config, path: &Path) -> Result<()> {
+    let content = toml::to_string_pretty(cfg).context("Failed to serialize config to TOML")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Cannot create config directory {}", parent.display()))?;
+    }
+    fs::write(path, content)
+        .with_context(|| format!("Cannot write config file {}", path.display()))?;
+    Ok(())
 }

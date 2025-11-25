@@ -238,6 +238,17 @@ pub fn ensure_mount_available(ctx: &RepoCtx) -> Result<bool> {
     })
 }
 
+pub fn init_repo(ctx: &RepoCtx, encryption: &str, passphrase: Option<&str>) -> Result<()> {
+    with_spinner("Initializing repository", |_pb| {
+        let output = run_borg(ctx, passphrase, |cmd| {
+            cmd.args(["init", "--encryption", encryption, &ctx.repo]);
+        })?;
+
+        ensure_success("init", output)?;
+        Ok(())
+    })
+}
+
 pub fn build_archive_name(preset: &BackupConfig, repo_name: &str) -> String {
     let ts = Local::now().format("%Y%m%d-%H%M%S");
     let mut segments = Vec::new();
@@ -400,5 +411,61 @@ pub fn repo_status(repo: &str, probe_ssh: bool) -> super::config::RepoStatus {
         super::config::RepoStatus::Ok
     } else {
         super::config::RepoStatus::MissingLocal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_archive_name_uses_prefix_and_preset() {
+        let preset = BackupConfig {
+            name: "home".into(),
+            includes: vec!["/data".into()],
+            excludes: vec![],
+            compression: None,
+            one_file_system: false,
+            exclude_caches: false,
+            archive_prefix: Some("raspi".into()),
+        };
+
+        let name = build_archive_name(&preset, "repo");
+
+        // Format: <prefix>-<preset>-YYYYMMDD-HHMMSS
+        let parts: Vec<&str> = name.split('-').collect();
+        assert!(parts.len() >= 3, "unexpected format: {name}");
+        assert_eq!(parts[0], "raspi");
+        assert_eq!(parts[1], "home");
+    }
+
+    #[test]
+    fn build_archive_name_defaults_to_repo_prefix() {
+        let preset = BackupConfig {
+            name: "sys".into(),
+            includes: vec!["/".into()],
+            excludes: vec![],
+            compression: None,
+            one_file_system: false,
+            exclude_caches: false,
+            archive_prefix: None,
+        };
+
+        let name = build_archive_name(&preset, "laptop");
+        let parts: Vec<&str> = name.split('-').collect();
+        assert!(parts.len() >= 3, "unexpected format: {name}");
+        assert_eq!(parts[0], "laptop");
+        assert_eq!(parts[1], "sys");
+    }
+
+    #[test]
+    fn extract_ssh_host_parses_variants() {
+        assert_eq!(
+            extract_ssh_host("ssh://user@host:22/path"),
+            Some("host".into())
+        );
+        assert_eq!(extract_ssh_host("ssh://host/repo"), Some("host".into()));
+        assert_eq!(extract_ssh_host("user@host:/repo"), Some("host".into()));
+        assert_eq!(extract_ssh_host("host"), None);
     }
 }
