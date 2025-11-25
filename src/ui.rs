@@ -186,19 +186,18 @@ pub fn select_repo_ctx(
         | Some(crate::cli::Commands::Interactive)
         | Some(crate::cli::Commands::Backup { .. }) => {
             show_step("Choose repository", &[])?;
-            let mut labels: Vec<String> = repos
+            let labels: Vec<String> = repos
                 .iter()
                 .map(|r| format!("{}  ({}) [{}]", r.name, r.repo, status_label(r.status)))
                 .collect();
-            labels.push("Back".to_string());
             let choice = Select::with_theme(theme)
-                .with_prompt("Choose repository (Back to quit)")
+                .with_prompt("Choose repository")
                 .items(&labels)
                 .default(0)
                 .interact_opt()?;
             return match choice {
-                Some(idx) if idx < repos.len() => ensure_repo_available(repos[idx].clone(), cmd),
-                _ => anyhow::bail!("No repository selected"),
+                Some(idx) => ensure_repo_available(repos[idx].clone(), cmd),
+                None => anyhow::bail!("No repository selected"),
             };
         }
         _ => {
