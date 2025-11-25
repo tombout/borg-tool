@@ -89,7 +89,7 @@ includes = ["{}"]
     config_path.write_str(&config)?;
 
     // Run backup via CLI (non-interactive)
-    let mut cmd = Command::cargo_bin("borg-tool-rs")?;
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("borg-tool-rs"));
     apply_env(&mut cmd, temp.path());
     cmd.arg("--config")
         .arg(config_path.path())
@@ -112,7 +112,7 @@ includes = ["{}"]
     let archive_name = &parsed.archives[0].name;
 
     // Ensure CLI list prints the archive name
-    let mut list_cmd = Command::cargo_bin("borg-tool-rs")?;
+    let mut list_cmd = Command::new(assert_cmd::cargo::cargo_bin!("borg-tool-rs"));
     apply_env(&mut list_cmd, temp.path());
     list_cmd
         .arg("--config")
@@ -125,7 +125,7 @@ includes = ["{}"]
         .stdout(contains(archive_name));
 
     // List files of the archive
-    let mut files_cmd = Command::cargo_bin("borg-tool-rs")?;
+    let mut files_cmd = Command::new(assert_cmd::cargo::cargo_bin!("borg-tool-rs"));
     apply_env(&mut files_cmd, temp.path());
     files_cmd
         .arg("--config")
