@@ -68,6 +68,9 @@ struct Config {
     /// Global mount root default
     #[serde(default = "default_mount_root")]
     mount_root: PathBuf,
+    /// Probe SSH availability on startup
+    #[serde(default = "default_probe_ssh")]
+    probe_ssh: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +139,10 @@ fn default_mount_root() -> PathBuf {
     env::temp_dir().join("borg-tool-mounts")
 }
 
+fn default_probe_ssh() -> bool {
+    true
+}
+
 fn default_config_path() -> PathBuf {
     if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("borg-tool").join("config.toml");
@@ -152,9 +159,13 @@ fn default_config_path() -> PathBuf {
     PathBuf::from("borg-tool.toml")
 }
 
-fn repo_status(repo: &str) -> RepoStatus {
+fn repo_status(repo: &str, probe_ssh: bool) -> RepoStatus {
     if repo.contains("://") || (repo.contains('@') && repo.contains(':')) {
-        return probe_remote(repo);
+        return if probe_ssh {
+            probe_remote(repo)
+        } else {
+            RepoStatus::Unknown
+        };
     }
 
     let path = Path::new(repo);
@@ -233,7 +244,7 @@ fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
                     .mount_root
                     .clone()
                     .unwrap_or_else(|| cfg.mount_root.clone()),
-                status: repo_status(&r.repo),
+                status: repo_status(&r.repo, cfg.probe_ssh),
             })
             .collect()
     } else if let Some(repo) = &cfg.repo {
@@ -242,7 +253,7 @@ fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
             repo: repo.clone(),
             borg_bin: cfg.borg_bin.clone(),
             mount_root: cfg.mount_root.clone(),
-            status: repo_status(repo),
+            status: repo_status(repo, cfg.probe_ssh),
         }]
     } else {
         Vec::new()

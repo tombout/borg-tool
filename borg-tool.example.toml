@@ -1,5 +1,6 @@
 borg_bin = "/usr/bin/borg" # optional global default
 mount_root = "/tmp/borg-tool-mounts" # optional global default
+probe_ssh = true  # disable if you don't want the tool to probe remote SSH connectivity
 
 [[repos]]
 name = "raspi"
