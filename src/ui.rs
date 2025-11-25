@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::Result;
 use dialoguer::{Confirm, Input, Select, console::Term, theme::ColorfulTheme};
@@ -24,9 +25,61 @@ pub enum MainAction {
     Quit,
 }
 
+fn short_hostname() -> String {
+    if let Ok(env) = std::env::var("HOSTNAME") {
+        if !env.trim().is_empty() {
+            return env;
+        }
+    }
+    match Command::new("hostname").arg("-s").output() {
+        Ok(out) if out.status.success() => {
+            let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if raw.is_empty() {
+                "unknown".to_string()
+            } else {
+                raw
+            }
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
 fn show_step(title: &str, lines: &[String]) -> Result<()> {
     let term = Term::stdout();
     term.clear_screen()?;
+    term.write_line(title)?;
+    if !lines.is_empty() {
+        for line in lines {
+            term.write_line(line)?;
+        }
+        term.write_line("")?;
+    }
+    Ok(())
+}
+
+fn show_step_with_ctx(
+    title: &str,
+    lines: &[String],
+    host: &str,
+    repo: &RepoCtx,
+    mount_available: bool,
+    mount: Option<&MountInfo>,
+) -> Result<()> {
+    let term = Term::stdout();
+    term.clear_screen()?;
+    let mount_line = if mount_available {
+        match mount {
+            Some(m) => format!("Mount: {} @ {}", m.archive, m.mountpoint.display()),
+            None => "Mount: none".to_string(),
+        }
+    } else {
+        "Mount: unavailable".to_string()
+    };
+    term.write_line(&format!(
+        "Host: {} | Repo: {} ({}) | {}",
+        host, repo.name, repo.repo, mount_line
+    ))?;
+    term.write_line("")?;
     term.write_line(title)?;
     if !lines.is_empty() {
         for line in lines {
@@ -309,6 +362,7 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
     let theme = dialog_theme();
     let mut mount_state: Option<MountInfo> = None;
     let mount_available = ensure_mount_available(repo).unwrap_or(false);
+    let host = short_hostname();
 
     loop {
         let mut main_info = vec![format!("Repo: {} ({})", repo.name, repo.repo)];
@@ -320,7 +374,14 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
         } else {
             "Mount unavailable (no FUSE support detected)".to_string()
         });
-        show_step("Main menu", &main_info)?;
+        show_step_with_ctx(
+            "Main menu",
+            &main_info,
+            &host,
+            repo,
+            mount_available,
+            mount_state.as_ref(),
+        )?;
 
         match select_main_action(&theme)? {
             MainAction::Archives => {
@@ -343,7 +404,14 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
                 } else {
                     "Mount unavailable (no FUSE support detected)".to_string()
                 });
-                show_step("Archives", &archive_info)?;
+                show_step_with_ctx(
+                    "Archives",
+                    &archive_info,
+                    &host,
+                    repo,
+                    mount_available,
+                    mount_state.as_ref(),
+                )?;
 
                 let archive = match select_archive(&archives, &theme)? {
                     Some(a) => a,
@@ -365,11 +433,26 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
                         m.mountpoint.display()
                     ));
                 }
-                show_step("Archive action", &action_info)?;
+                show_step_with_ctx(
+                    "Archive action",
+                    &action_info,
+                    &host,
+                    repo,
+                    mount_available,
+                    mount_state.as_ref(),
+                )?;
 
                 match select_archive_action(&theme, mount_state.is_some(), mount_available)? {
                     ArchiveAction::Browse => {
-                        browse_files(repo, &archive, pass.as_deref(), &theme)?;
+                        browse_files(
+                            &host,
+                            repo,
+                            &archive,
+                            pass.as_deref(),
+                            &theme,
+                            mount_available,
+                            mount_state.as_ref(),
+                        )?;
                     }
                     ArchiveAction::Mount => {
                         if let Some(active) = &mount_state {
@@ -416,9 +499,13 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
                     println!("No backups configured for repo '{}'.", repo.name);
                     continue;
                 }
-                show_step(
+                show_step_with_ctx(
                     "Backup presets",
                     &[format!("Repo: {} ({})", repo.name, repo.repo)],
+                    &host,
+                    repo,
+                    mount_available,
+                    mount_state.as_ref(),
                 )?;
                 let preset = match select_backup(&repo.backups, &theme)? {
                     Some(p) => p,
@@ -434,13 +521,16 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
 }
 
 pub fn browse_files(
+    host: &str,
     repo: &RepoCtx,
     archive: &BorgArchive,
     passphrase: Option<&str>,
     theme: &ColorfulTheme,
+    mount_available: bool,
+    mount: Option<&MountInfo>,
 ) -> Result<()> {
     loop {
-        show_step(
+        show_step_with_ctx(
             "Browse files",
             &[
                 format!("Repo: {} ({})", repo.name, repo.repo),
@@ -450,6 +540,10 @@ pub fn browse_files(
                     archive.time_utc.as_deref().unwrap_or("-")
                 ),
             ],
+            host,
+            repo,
+            mount_available,
+            mount,
         )?;
         let items = list_items(repo, &archive.name, passphrase)?;
         if items.is_empty() {
