@@ -7,34 +7,51 @@ on:
 
 jobs:
   build-and-publish:
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.cargo
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+
+      - name: Install aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Generate checksums
         run: |
-          cd target/release
-          sha256sum borg-tool-rs > SHA256SUMS
+          release_dir="target/${{ matrix.target }}/release"
+          cp "$release_dir/borg-tool-rs" "$release_dir/borg-tool-rs-${{ matrix.target }}"
+          (cd "$release_dir" && sha256sum "borg-tool-rs-${{ matrix.target }}" > "SHA256SUMS-${{ matrix.target }}")
 
       - name: Install cyclonedx-cargo
         run: cargo install cyclonedx-cargo --locked
 
       - name: Generate SBOM
-        run: cyclonedx-cargo --output-format json --output-file sbom.json
+        run: cyclonedx-cargo --output-format json --output-file sbom-${{ matrix.target }}.json
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/release/borg-tool-rs
-            target/release/SHA256SUMS
-            sbom.json
+            target/${{ matrix.target }}/release/borg-tool-rs-${{ matrix.target }}
+            target/${{ matrix.target }}/release/SHA256SUMS-${{ matrix.target }}
+            sbom-${{ matrix.target }}.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
