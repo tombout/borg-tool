@@ -199,9 +199,9 @@ pub fn select_repo_ctx(
                 .iter()
                 .map(|r| format!("{}  ({}) [{}]", r.name, r.repo, status_label(r.status)))
                 .collect();
-            labels.push("Back".to_string());
+            labels.push("Quit".to_string());
             let choice = Select::with_theme(theme)
-                .with_prompt("Choose repository (Esc/Back to quit)")
+                .with_prompt("Choose repository (Esc/Quit to exit)")
                 .items(&labels)
                 .default(0)
                 .interact_opt()?;
