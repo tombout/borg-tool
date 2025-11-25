@@ -246,11 +246,18 @@ fn extract_file(
 
     let mut cmd = Command::new(&cfg.borg_bin);
     cmd.current_dir(dest_dir);
-    cmd.args([
-        "extract",
-        &format!("{}::{}", cfg.repo, archive),
-        path_in_archive,
-    ]);
+    cmd.arg("extract");
+
+    // Strip leading path components so only the selected entry is written.
+    let strip_components = std::path::Path::new(path_in_archive)
+        .components()
+        .count()
+        .saturating_sub(1);
+    if strip_components > 0 {
+        cmd.args(["--strip-components", &strip_components.to_string()]);
+    }
+
+    cmd.args([&format!("{}::{}", cfg.repo, archive), path_in_archive]);
 
     if let Some(pass) = passphrase {
         cmd.env("BORG_PASSPHRASE", pass);
