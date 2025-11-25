@@ -927,40 +927,43 @@ fn run_backup(ctx: &RepoCtx, backup_name: Option<&str>, passphrase: Option<&str>
     }
 
     let archive_name = build_archive_name(&preset, &ctx.name);
-    println!("Creating archive '{}' in repo {}", archive_name, ctx.repo);
 
-    let mut cmd = Command::new(&ctx.borg_bin);
-    cmd.arg("create");
+    with_spinner(&format!("Creating {}", archive_name), |_pb| {
+        let mut cmd = Command::new(&ctx.borg_bin);
+        cmd.arg("create");
 
-    if let Some(comp) = &preset.compression {
-        cmd.args(["--compression", comp]);
-    }
-    if preset.one_file_system {
-        cmd.arg("--one-file-system");
-    }
-    if preset.exclude_caches {
-        cmd.arg("--exclude-caches");
-    }
-    for pat in &preset.excludes {
-        cmd.args(["--exclude", pat]);
-    }
+        if let Some(comp) = &preset.compression {
+            cmd.args(["--compression", comp]);
+        }
+        if preset.one_file_system {
+            cmd.arg("--one-file-system");
+        }
+        if preset.exclude_caches {
+            cmd.arg("--exclude-caches");
+        }
+        for pat in &preset.excludes {
+            cmd.args(["--exclude", pat]);
+        }
 
-    cmd.arg(format!("{}::{}", ctx.repo, archive_name));
-    for inc in &preset.includes {
-        cmd.arg(inc);
-    }
+        cmd.arg(format!("{}::{}", ctx.repo, archive_name));
+        for inc in &preset.includes {
+            cmd.arg(inc);
+        }
 
-    if let Some(pass) = passphrase {
-        cmd.env("BORG_PASSPHRASE", pass);
-    }
+        if let Some(pass) = passphrase {
+            cmd.env("BORG_PASSPHRASE", pass);
+        }
 
-    let status = cmd
-        .status()
-        .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
+        let status = cmd
+            .status()
+            .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
 
-    if !status.success() {
-        anyhow::bail!("borg create failed with status {}", status);
-    }
+        if !status.success() {
+            anyhow::bail!("borg create failed with status {}", status);
+        }
+
+        Ok(())
+    })?;
 
     println!("Backup '{}' completed", archive_name);
     Ok(())
