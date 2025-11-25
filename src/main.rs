@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -416,9 +417,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let cmd = cli.command;
 
-    let config_path = cli.config.unwrap_or_else(default_config_path);
-    let config = load_config(&config_path)
-        .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
+    let (config, _config_path) = load_config_resolved(cli.config).with_context(|| {
+        "Failed to load config (searched default path and ./borg-tool.toml when unset)".to_string()
+    })?;
 
     let theme = ColorfulTheme::default();
     let repo_ctx = select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
@@ -477,6 +478,48 @@ fn load_config(path: &PathBuf) -> Result<Config> {
     let cfg: Config =
         toml::from_str(&raw).with_context(|| format!("Invalid TOML in {}", path.display()))?;
     Ok(cfg)
+}
+
+fn load_config_resolved(cli_path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
+    if let Some(path) = cli_path {
+        let cfg = load_config(&path)?;
+        return Ok((cfg, path));
+    }
+
+    let default_path = default_config_path();
+    let fallback_path = PathBuf::from("borg-tool.toml");
+    let candidates = [default_path.clone(), fallback_path.clone()];
+    let mut last_not_found: Option<(PathBuf, anyhow::Error)> = None;
+
+    for path in candidates {
+        match load_config(&path) {
+            Ok(cfg) => return Ok((cfg, path)),
+            Err(err) => {
+                let not_found = err
+                    .downcast_ref::<std::io::Error>()
+                    .map(|ioe| ioe.kind() == ErrorKind::NotFound)
+                    .unwrap_or(false);
+                if not_found {
+                    last_not_found = Some((path, err));
+                    continue;
+                }
+                // any other error should surface immediately
+                return Err(err);
+            }
+        }
+    }
+
+    let tried = vec![default_path, fallback_path]
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if let Some((_, err)) = last_not_found {
+        return Err(err.context(format!("No config file found. Tried: {}", tried)));
+    }
+
+    anyhow::bail!("No config file found. Tried: {}", tried)
 }
 
 /// Return archives and optionally print them.
