@@ -11,11 +11,49 @@ repo = "ssh://raspi-local/mnt/extern/borg-repo"
 [[repos.backups]]
 name = "home"
 includes = ["/home"]
-excludes = ["/home/*/.cache", "/home/*/.cargo"]
+excludes = [
+  "/home/*/.cache",
+  "/home/*/.local/share/Trash",
+  "/home/*/.npm",
+  "/home/*/.cache/pip",
+  "/home/*/.cache/pypoetry",
+  "/home/*/.cargo/registry",
+  "/home/*/.cargo/git",
+  "/home/*/.rustup/toolchains",
+  "/home/*/.rustup/tmp",
+  "/home/*/Downloads",
+]
 compression = "zstd,6" # optional
 one_file_system = true    # optional
 exclude_caches = true     # optional
 # archive_prefix = "raspi" # optional, defaults to repo name
+
+[[repos.backups]]
+name = "system"
+includes = ["/"]
+excludes = [
+  "/dev",
+  "/proc",
+  "/sys",
+  "/run",
+  "/tmp",
+  "/var/tmp",
+  "/var/cache",
+  "/var/log",
+  "/var/lib/docker",
+  "/var/lib/containers",
+  "/lost+found",
+  "/mnt",
+  "/media",
+  "/swapfile",
+  "/home/*/.cache",
+  "/home/*/.local/share/Trash",
+  "/home/*/Downloads",
+]
+compression = "zstd,6"
+exclude_caches = true
+# one_file_system = false # allow other mountpoints like /boot; set true if you prefer to skip them
+# archive_prefix = "raspi"
 
 [[repos]]
 name = "laptop"
