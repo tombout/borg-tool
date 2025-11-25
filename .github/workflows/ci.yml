@@ -43,7 +43,7 @@ jobs:
         run: cargo test e2e_mount_flow -- --ignored
 
   e2e-ssh:
-    if: ${{ vars.ENABLE_SSH_E2E == '1' && secrets.BORG_TOOL_SSH_REPO != '' }}
+    if: ${{ github.event_name == 'push' && vars.ENABLE_SSH_E2E == '1' && secrets.BORG_TOOL_SSH_REPO != '' }}
     runs-on: ubuntu-latest
     env:
       BORG_TOOL_ENABLE_SSH_TESTS: "1"
