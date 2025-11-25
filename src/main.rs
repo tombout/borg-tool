@@ -2,11 +2,13 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+use indicatif::{ProgressBar, ProgressStyle};
 use rpassword::prompt_password;
 use serde::Deserialize;
 
@@ -233,7 +235,7 @@ fn probe_remote(repo: &str) -> RepoStatus {
 }
 
 fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
-    if !cfg.repos.is_empty() {
+    let mut repos: Vec<RepoCtx> = if !cfg.repos.is_empty() {
         cfg.repos
             .iter()
             .map(|r| RepoCtx {
@@ -244,7 +246,7 @@ fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
                     .mount_root
                     .clone()
                     .unwrap_or_else(|| cfg.mount_root.clone()),
-                status: repo_status(&r.repo, cfg.probe_ssh),
+                status: RepoStatus::Unknown,
             })
             .collect()
     } else if let Some(repo) = &cfg.repo {
@@ -253,11 +255,44 @@ fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
             repo: repo.clone(),
             borg_bin: cfg.borg_bin.clone(),
             mount_root: cfg.mount_root.clone(),
-            status: repo_status(repo, cfg.probe_ssh),
+            status: RepoStatus::Unknown,
         }]
     } else {
         Vec::new()
+    };
+
+    if repos.is_empty() {
+        return repos;
     }
+
+    let style =
+        ProgressStyle::with_template("{spinner:.green} {msg}").expect("static progress template");
+
+    let total = repos.len();
+
+    for (idx, repo) in repos.iter_mut().enumerate() {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(style.clone());
+        pb.set_message(format!(
+            "({}/{}) Probing {} ({})",
+            idx + 1,
+            total,
+            repo.name,
+            repo.repo
+        ));
+        pb.enable_steady_tick(Duration::from_millis(120));
+
+        repo.status = repo_status(&repo.repo, cfg.probe_ssh);
+
+        pb.finish_with_message(format!(
+            "[{}] {} ({})",
+            status_label(repo.status),
+            repo.name,
+            repo.repo
+        ));
+    }
+
+    repos
 }
 
 fn select_repo_ctx(
