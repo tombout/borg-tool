@@ -27,10 +27,10 @@ pub enum MainAction {
 }
 
 fn short_hostname() -> String {
-    if let Ok(env) = std::env::var("HOSTNAME") {
-        if !env.trim().is_empty() {
-            return env;
-        }
+    if let Ok(env) = std::env::var("HOSTNAME")
+        && !env.trim().is_empty()
+    {
+        return env;
     }
     match Command::new("hostname").arg("-s").output() {
         Ok(out) if out.status.success() => {
@@ -175,14 +175,12 @@ pub fn select_repo_ctx(
     // Single repo fast path
     if repos.len() == 1 {
         let ctx = repos.into_iter().next().unwrap();
-        if let Some(req) = cli_repo {
-            if req != ctx.name {
-                anyhow::bail!(
-                    "Repo '{}' not found. Only available repo: {}",
-                    req,
-                    ctx.name
-                );
-            }
+        if let Some(req) = cli_repo && req != ctx.name {
+            anyhow::bail!(
+                "Repo '{}' not found. Only available repo: {}",
+                req,
+                ctx.name
+            );
         }
         return Ok(Some(ctx));
     }
@@ -212,12 +210,12 @@ pub fn select_repo_ctx(
                 .items(&labels)
                 .default(0)
                 .interact_opt()?;
-            return match choice {
+            match choice {
                 Some(idx) if idx < repos.len() => {
                     ensure_repo_available(repos[idx].clone(), cmd).map(Some)
                 }
                 _ => Ok(None),
-            };
+            }
         }
         _ => {
             let names = repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>();

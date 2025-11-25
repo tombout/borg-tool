@@ -73,7 +73,7 @@ fn main() -> Result<()> {
             let repo_ctx = ui::select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?
                 .ok_or_else(|| anyhow::anyhow!("No repository selected"))?;
             let pass = borg::ensure_passphrase_cached(&mut passphrase_cache, &repo_ctx)?;
-            borg::umount_archive(&repo_ctx, &mountpoint, pass.as_deref())?;
+            borg::umount_archive(&repo_ctx, mountpoint, pass.as_deref())?;
             println!("Unmounted {}", mountpoint.display());
         }
         Some(cli::Commands::Backup { ref backup }) => {

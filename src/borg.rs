@@ -1,4 +1,9 @@
-use std::{fs, path::Path, process::Command, time::Duration};
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Output},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -34,6 +39,35 @@ fn spinner_style() -> ProgressStyle {
     ProgressStyle::with_template("{spinner:.green} {msg}").expect("static spinner template")
 }
 
+fn run_borg<F>(ctx: &RepoCtx, passphrase: Option<&str>, build: F) -> Result<Output>
+where
+    F: FnOnce(&mut Command),
+{
+    let mut cmd = Command::new(&ctx.borg_bin);
+    build(&mut cmd);
+
+    if let Some(pass) = passphrase {
+        cmd.env("BORG_PASSPHRASE", pass);
+    }
+
+    cmd.output()
+        .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))
+}
+
+fn ensure_success(action: &str, output: Output) -> Result<Output> {
+    if output.status.success() {
+        return Ok(output);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!(
+        "borg {} failed with status {}: {}",
+        action,
+        output.status,
+        stderr.trim()
+    );
+}
+
 pub fn with_spinner<T, F>(message: &str, action: F) -> Result<T>
 where
     F: FnOnce(&ProgressBar) -> Result<T>,
@@ -55,25 +89,10 @@ where
 
 pub fn list_archives(ctx: &RepoCtx, passphrase: Option<&str>) -> Result<Vec<BorgArchive>> {
     with_spinner("Listing archives", |pb| {
-        let mut cmd = Command::new(&ctx.borg_bin);
-        cmd.args(["list", "--json", &ctx.repo]);
-
-        if let Some(pass) = passphrase {
-            cmd.env("BORG_PASSPHRASE", pass);
-        }
-
-        let output = cmd
-            .output()
-            .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "borg list failed with status {}: {}",
-                output.status,
-                stderr.trim()
-            );
-        }
+        let output = run_borg(ctx, passphrase, |cmd| {
+            cmd.args(["list", "--json", &ctx.repo]);
+        })?;
+        let output = ensure_success("list", output)?;
 
         let parsed: BorgListResponse =
             serde_json::from_slice(&output.stdout).context("Failed to parse borg JSON output")?;
@@ -89,29 +108,14 @@ pub fn list_archives(ctx: &RepoCtx, passphrase: Option<&str>) -> Result<Vec<Borg
 
 pub fn list_items(ctx: &RepoCtx, archive: &str, passphrase: Option<&str>) -> Result<Vec<BorgItem>> {
     with_spinner(&format!("Listing items in {}", archive), |_pb| {
-        let mut cmd = Command::new(&ctx.borg_bin);
-        cmd.args([
-            "list",
-            "--json-lines",
-            &format!("{}::{}", ctx.repo, archive),
-        ]);
-
-        if let Some(pass) = passphrase {
-            cmd.env("BORG_PASSPHRASE", pass);
-        }
-
-        let output = cmd
-            .output()
-            .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "borg list for archive failed with status {}: {}",
-                output.status,
-                stderr.trim()
-            );
-        }
+        let output = run_borg(ctx, passphrase, |cmd| {
+            cmd.args([
+                "list",
+                "--json-lines",
+                &format!("{}::{}", ctx.repo, archive),
+            ]);
+        })?;
+        let output = ensure_success("list items", output)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut items = Vec::new();
@@ -142,37 +146,23 @@ pub fn extract_file(
             fs::create_dir_all(dest_dir)
                 .with_context(|| format!("Create destination {}", dest_dir))?;
 
-            let mut cmd = Command::new(&ctx.borg_bin);
-            cmd.current_dir(dest_dir);
-            cmd.arg("extract");
+            let output = run_borg(ctx, passphrase, |cmd| {
+                cmd.current_dir(dest_dir);
+                cmd.arg("extract");
 
-            // Strip leading path components so only the selected entry is written.
-            let strip_components = std::path::Path::new(path_in_archive)
-                .components()
-                .count()
-                .saturating_sub(1);
-            if strip_components > 0 {
-                cmd.args(["--strip-components", &strip_components.to_string()]);
-            }
+                // Strip leading path components so only the selected entry is written.
+                let strip_components = std::path::Path::new(path_in_archive)
+                    .components()
+                    .count()
+                    .saturating_sub(1);
+                if strip_components > 0 {
+                    cmd.args(["--strip-components", &strip_components.to_string()]);
+                }
 
-            cmd.args([&format!("{}::{}", ctx.repo, archive), path_in_archive]);
+                cmd.args([&format!("{}::{}", ctx.repo, archive), path_in_archive]);
+            })?;
 
-            if let Some(pass) = passphrase {
-                cmd.env("BORG_PASSPHRASE", pass);
-            }
-
-            let output = cmd
-                .output()
-                .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!(
-                    "borg extract failed with status {}: {}",
-                    output.status,
-                    stderr.trim()
-                );
-            }
+            ensure_success("extract", output)?;
 
             Ok(())
         },
@@ -191,29 +181,15 @@ pub fn mount_archive(
             fs::create_dir_all(mountpoint)
                 .with_context(|| format!("Create mountpoint {}", mountpoint.display()))?;
 
-            let mut cmd = Command::new(&ctx.borg_bin);
-            cmd.args([
-                "mount",
-                &format!("{}::{}", ctx.repo, archive),
-                &mountpoint.display().to_string(),
-            ]);
+            let output = run_borg(ctx, passphrase, |cmd| {
+                cmd.args([
+                    "mount",
+                    &format!("{}::{}", ctx.repo, archive),
+                    &mountpoint.display().to_string(),
+                ]);
+            })?;
 
-            if let Some(pass) = passphrase {
-                cmd.env("BORG_PASSPHRASE", pass);
-            }
-
-            let output = cmd
-                .output()
-                .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!(
-                    "borg mount failed with status {}: {}",
-                    output.status,
-                    stderr.trim()
-                );
-            }
+            ensure_success("mount", output)?;
 
             Ok(())
         },
@@ -222,25 +198,11 @@ pub fn mount_archive(
 
 pub fn umount_archive(ctx: &RepoCtx, mountpoint: &Path, passphrase: Option<&str>) -> Result<()> {
     with_spinner(&format!("Unmounting {}", mountpoint.display()), |_pb| {
-        let mut cmd = Command::new(&ctx.borg_bin);
-        cmd.args(["umount", &mountpoint.display().to_string()]);
+        let output = run_borg(ctx, passphrase, |cmd| {
+            cmd.args(["umount", &mountpoint.display().to_string()]);
+        })?;
 
-        if let Some(pass) = passphrase {
-            cmd.env("BORG_PASSPHRASE", pass);
-        }
-
-        let output = cmd
-            .output()
-            .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "borg umount failed with status {}: {}",
-                output.status,
-                stderr.trim()
-            );
-        }
+        ensure_success("umount", output)?;
 
         Ok(())
     })
@@ -252,10 +214,9 @@ pub fn default_mountpoint(ctx: &RepoCtx, archive: &str) -> std::path::PathBuf {
 
 pub fn ensure_mount_available(ctx: &RepoCtx) -> Result<bool> {
     with_spinner("Checking mount support", |_pb| {
-        let output = Command::new(&ctx.borg_bin)
-            .args(["mount", "--help"])
-            .output()
-            .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
+        let output = run_borg(ctx, None, |cmd| {
+            cmd.args(["mount", "--help"]);
+        })?;
 
         let combined = format!(
             "{}\n{}",
@@ -302,34 +263,27 @@ pub fn run_backup(ctx: &RepoCtx, preset: &BackupConfig, passphrase: Option<&str>
     let archive_name = build_archive_name(preset, &ctx.name);
 
     with_spinner(&format!("Creating {}", archive_name), |_pb| {
-        let mut cmd = Command::new(&ctx.borg_bin);
-        cmd.arg("create");
+        let output = run_borg(ctx, passphrase, |cmd| {
+            cmd.arg("create");
 
-        if let Some(comp) = &preset.compression {
-            cmd.args(["--compression", comp]);
-        }
-        if preset.one_file_system {
-            cmd.arg("--one-file-system");
-        }
-        if preset.exclude_caches {
-            cmd.arg("--exclude-caches");
-        }
-        for pat in &preset.excludes {
-            cmd.args(["--exclude", pat]);
-        }
+            if let Some(comp) = &preset.compression {
+                cmd.args(["--compression", comp]);
+            }
+            if preset.one_file_system {
+                cmd.arg("--one-file-system");
+            }
+            if preset.exclude_caches {
+                cmd.arg("--exclude-caches");
+            }
+            for pat in &preset.excludes {
+                cmd.args(["--exclude", pat]);
+            }
 
-        cmd.arg(format!("{}::{}", ctx.repo, archive_name));
-        for inc in &preset.includes {
-            cmd.arg(inc);
-        }
-
-        if let Some(pass) = passphrase {
-            cmd.env("BORG_PASSPHRASE", pass);
-        }
-
-        let output = cmd
-            .output()
-            .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
+            cmd.arg(format!("{}::{}", ctx.repo, archive_name));
+            for inc in &preset.includes {
+                cmd.arg(inc);
+            }
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -416,7 +370,7 @@ pub fn probe_remote(repo: &str) -> super::config::RepoStatus {
 pub fn extract_ssh_host(repo: &str) -> Option<String> {
     if let Some(rest) = repo.strip_prefix("ssh://") {
         let host_part = rest.split('/').next().unwrap_or(rest);
-        let host_port = host_part.split('@').last().unwrap_or(host_part);
+        let host_port = host_part.rsplit('@').next().unwrap_or(host_part);
         // drop possible path after colon for scp-like paths inside ssh:// already handled above
         let host = host_port.split(':').next().unwrap_or(host_port);
         return Some(host.to_string());
