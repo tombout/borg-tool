@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+use dialoguer::{Confirm, Input, Select, console::Term, theme::ColorfulTheme};
 
 use crate::borg::{
     BorgArchive, BorgItem, default_mountpoint, ensure_mount_available, ensure_passphrase_cached,
@@ -22,6 +22,19 @@ pub enum MainAction {
     Archives,
     Backups,
     Quit,
+}
+
+fn show_step(title: &str, lines: &[String]) -> Result<()> {
+    let term = Term::stdout();
+    term.clear_screen()?;
+    term.write_line(title)?;
+    if !lines.is_empty() {
+        for line in lines {
+            term.write_line(line)?;
+        }
+        term.write_line("")?;
+    }
+    Ok(())
 }
 
 pub fn dialog_theme() -> ColorfulTheme {
@@ -119,6 +132,7 @@ pub fn select_repo_ctx(
         None
         | Some(crate::cli::Commands::Interactive)
         | Some(crate::cli::Commands::Backup { .. }) => {
+            show_step("Choose repository", &[])?;
             let labels: Vec<String> = repos
                 .iter()
                 .map(|r| format!("{}  ({}) [{}]", r.name, r.repo, status_label(r.status)))
@@ -297,6 +311,17 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
     let mount_available = ensure_mount_available(repo).unwrap_or(false);
 
     loop {
+        let mut main_info = vec![format!("Repo: {} ({})", repo.name, repo.repo)];
+        main_info.push(if mount_available {
+            match &mount_state {
+                Some(m) => format!("Mounted: {} @ {}", m.archive, m.mountpoint.display()),
+                None => "Mount available (none mounted)".to_string(),
+            }
+        } else {
+            "Mount unavailable (no FUSE support detected)".to_string()
+        });
+        show_step("Main menu", &main_info)?;
+
         match select_main_action(&theme)? {
             MainAction::Archives => {
                 let pass = ensure_passphrase_cached(passphrase_cache, repo)?;
@@ -306,16 +331,41 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
                     continue;
                 }
 
-                if !mount_available {
-                    println!("(Mount unavailable: no FUSE support detected)");
-                } else if let Some(m) = &mount_state {
-                    println!("Mounted: {} @ {}", m.archive, m.mountpoint.display());
-                }
+                let mut archive_info = vec![
+                    format!("Repo: {} ({})", repo.name, repo.repo),
+                    format!("Archives found: {}", archives.len()),
+                ];
+                archive_info.push(if mount_available {
+                    match &mount_state {
+                        Some(m) => format!("Mounted: {} @ {}", m.archive, m.mountpoint.display()),
+                        None => "Mount available (none mounted)".to_string(),
+                    }
+                } else {
+                    "Mount unavailable (no FUSE support detected)".to_string()
+                });
+                show_step("Archives", &archive_info)?;
 
                 let archive = match select_archive(&archives, &theme)? {
                     Some(a) => a,
                     None => continue,
                 };
+
+                let mut action_info = vec![
+                    format!("Repo: {} ({})", repo.name, repo.repo),
+                    format!(
+                        "Archive: {} [{}]",
+                        archive.name,
+                        archive.time_utc.as_deref().unwrap_or("-")
+                    ),
+                ];
+                if let Some(m) = &mount_state {
+                    action_info.push(format!(
+                        "Mounted: {} @ {}",
+                        m.archive,
+                        m.mountpoint.display()
+                    ));
+                }
+                show_step("Archive action", &action_info)?;
 
                 match select_archive_action(&theme, mount_state.is_some(), mount_available)? {
                     ArchiveAction::Browse => {
@@ -366,6 +416,10 @@ pub fn run_interactive(repo: &RepoCtx, passphrase_cache: &mut Option<String>) ->
                     println!("No backups configured for repo '{}'.", repo.name);
                     continue;
                 }
+                show_step(
+                    "Backup presets",
+                    &[format!("Repo: {} ({})", repo.name, repo.repo)],
+                )?;
                 let preset = match select_backup(&repo.backups, &theme)? {
                     Some(p) => p,
                     None => continue,
@@ -386,6 +440,17 @@ pub fn browse_files(
     theme: &ColorfulTheme,
 ) -> Result<()> {
     loop {
+        show_step(
+            "Browse files",
+            &[
+                format!("Repo: {} ({})", repo.name, repo.repo),
+                format!(
+                    "Archive: {} [{}]",
+                    archive.name,
+                    archive.time_utc.as_deref().unwrap_or("-")
+                ),
+            ],
+        )?;
         let items = list_items(repo, &archive.name, passphrase)?;
         if items.is_empty() {
             println!("No files in archive {}", archive.name);
