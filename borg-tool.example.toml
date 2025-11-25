@@ -1,2 +1,12 @@
-repo = "ssh://user@host/path/to/borg-repo"
-# borg_bin = "/usr/bin/borg"
+borg_bin = "/usr/bin/borg" # optional global default
+mount_root = "/tmp/borg-tool-mounts" # optional global default
+
+[[repos]]
+name = "raspi"
+repo = "ssh://raspi-local/mnt/extern/borg-repo"
+# borg_bin = "/usr/local/bin/borg" # optional per-repo
+# mount_root = "/tmp/borg-raspi"
+
+[[repos]]
+name = "laptop"
+repo = "/mnt/backup/borg-repo"

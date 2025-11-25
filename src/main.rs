@@ -21,6 +21,9 @@ struct Cli {
     /// Path to the config file
     #[arg(short, long)]
     config: Option<PathBuf>,
+    /// Which configured repo to use (by name)
+    #[arg(short, long)]
+    repo: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -54,12 +57,15 @@ enum Commands {
 
 #[derive(Debug, Deserialize)]
 struct Config {
-    /// Path/URL of the Borg repository, same as you would pass to `borg list`
-    repo: String,
-    /// Borg binary to invoke (optional)
+    /// Repositories (preferred, supports multiple)
+    #[serde(default)]
+    repos: Vec<RepoConfig>,
+    /// Legacy single repo (fallback)
+    repo: Option<String>,
+    /// Global borg binary default
     #[serde(default = "default_borg_bin")]
     borg_bin: String,
-    /// Root directory for mounts
+    /// Global mount root default
     #[serde(default = "default_mount_root")]
     mount_root: PathBuf,
 }
@@ -85,6 +91,25 @@ struct BorgItem {
     item_type: Option<String>,
     #[allow(dead_code)]
     size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct RepoConfig {
+    name: String,
+    /// Path/URL of the Borg repository
+    repo: String,
+    /// Optional repo-specific borg binary
+    borg_bin: Option<String>,
+    /// Optional repo-specific mount root
+    mount_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct RepoCtx {
+    name: String,
+    repo: String,
+    borg_bin: String,
+    mount_root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +142,94 @@ fn default_config_path() -> PathBuf {
     PathBuf::from("borg-tool.toml")
 }
 
+fn build_repo_list(cfg: &Config) -> Vec<RepoCtx> {
+    if !cfg.repos.is_empty() {
+        cfg.repos
+            .iter()
+            .map(|r| RepoCtx {
+                name: r.name.clone(),
+                repo: r.repo.clone(),
+                borg_bin: r.borg_bin.clone().unwrap_or_else(|| cfg.borg_bin.clone()),
+                mount_root: r
+                    .mount_root
+                    .clone()
+                    .unwrap_or_else(|| cfg.mount_root.clone()),
+            })
+            .collect()
+    } else if let Some(repo) = &cfg.repo {
+        vec![RepoCtx {
+            name: "default".to_string(),
+            repo: repo.clone(),
+            borg_bin: cfg.borg_bin.clone(),
+            mount_root: cfg.mount_root.clone(),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+fn select_repo_ctx(
+    cfg: &Config,
+    cli_repo: Option<&str>,
+    cmd: Option<&Commands>,
+    theme: &ColorfulTheme,
+) -> Result<RepoCtx> {
+    let repos = build_repo_list(cfg);
+    if repos.is_empty() {
+        anyhow::bail!("No repositories configured in config file");
+    }
+
+    // Single repo fast path
+    if repos.len() == 1 {
+        let ctx = repos.into_iter().next().unwrap();
+        if let Some(req) = cli_repo {
+            if req != ctx.name {
+                anyhow::bail!(
+                    "Repo '{}' not found. Only available repo: {}",
+                    req,
+                    ctx.name
+                );
+            }
+        }
+        return Ok(ctx);
+    }
+
+    // multiple repos
+    if let Some(req) = cli_repo {
+        if let Some(found) = repos.iter().find(|r| r.name == req) {
+            return Ok(found.clone());
+        }
+        let names = repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>();
+        anyhow::bail!("Repo '{}' not found. Available: {}", req, names.join(", "));
+    }
+
+    // interactive selection allowed only for interactive commands
+    match cmd {
+        None | Some(Commands::Interactive) => {
+            let labels: Vec<String> = repos
+                .iter()
+                .map(|r| format!("{}  ({})", r.name, r.repo))
+                .collect();
+            let choice = Select::with_theme(theme)
+                .with_prompt("Choose repository")
+                .items(&labels)
+                .default(0)
+                .interact_opt()?;
+            match choice {
+                Some(idx) => Ok(repos[idx].clone()),
+                None => anyhow::bail!("No repository selected"),
+            }
+        }
+        _ => {
+            let names = repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>();
+            anyhow::bail!(
+                "Multiple repos configured. Please choose with --repo <name>. Available: {}",
+                names.join(", ")
+            );
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cmd = cli.command;
@@ -125,19 +238,21 @@ fn main() -> Result<()> {
     let config = load_config(&config_path)
         .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
 
+    let theme = ColorfulTheme::default();
+    let repo_ctx = select_repo_ctx(&config, cli.repo.as_deref(), cmd.as_ref(), &theme)?;
+
     // Prompt passphrase once if needed; reused for subsequent borg calls.
-    let passphrase = ensure_passphrase(&config)?;
+    let passphrase = ensure_passphrase(&repo_ctx)?;
 
     match cmd {
-        None => run_interactive(&config, passphrase)?,
-        Some(Commands::Interactive) => run_interactive(&config, passphrase)?,
+        None => run_interactive(&repo_ctx, passphrase)?,
+        Some(Commands::Interactive) => run_interactive(&repo_ctx, passphrase)?,
         Some(Commands::List) => {
-            let archives = list_archives(&config, passphrase.as_deref())?;
+            let archives = list_archives(&repo_ctx, passphrase.as_deref())?;
             print_archives(&archives);
         }
         Some(Commands::Files { archive }) => {
-            let archives = list_archives(&config, passphrase.as_deref())?;
-            let theme = ColorfulTheme::default();
+            let archives = list_archives(&repo_ctx, passphrase.as_deref())?;
             let selected = match archive {
                 Some(name) => archives
                     .iter()
@@ -149,17 +264,17 @@ fn main() -> Result<()> {
                     None => return Ok(()),
                 },
             };
-            let items = list_items(&config, &selected.name, passphrase.as_deref())?;
+            let items = list_items(&repo_ctx, &selected.name, passphrase.as_deref())?;
             print_items(&items);
         }
         Some(Commands::Mount { archive, target }) => {
-            ensure_mount_available(&config)?;
-            let mountpoint = target.unwrap_or_else(|| default_mountpoint(&config, &archive));
-            mount_archive(&config, &archive, &mountpoint, passphrase.as_deref())?;
+            ensure_mount_available(&repo_ctx)?;
+            let mountpoint = target.unwrap_or_else(|| default_mountpoint(&repo_ctx, &archive));
+            mount_archive(&repo_ctx, &archive, &mountpoint, passphrase.as_deref())?;
             println!("Mounted {} at {}", archive, mountpoint.display());
         }
         Some(Commands::Umount { mountpoint }) => {
-            umount_archive(&config, &mountpoint, passphrase.as_deref())?;
+            umount_archive(&repo_ctx, &mountpoint, passphrase.as_deref())?;
             println!("Unmounted {}", mountpoint.display());
         }
     }
@@ -176,9 +291,9 @@ fn load_config(path: &PathBuf) -> Result<Config> {
 }
 
 /// Return archives and optionally print them.
-fn list_archives(cfg: &Config, passphrase: Option<&str>) -> Result<Vec<BorgArchive>> {
-    let mut cmd = Command::new(&cfg.borg_bin);
-    cmd.args(["list", "--json", &cfg.repo]);
+fn list_archives(ctx: &RepoCtx, passphrase: Option<&str>) -> Result<Vec<BorgArchive>> {
+    let mut cmd = Command::new(&ctx.borg_bin);
+    cmd.args(["list", "--json", &ctx.repo]);
 
     if let Some(pass) = passphrase {
         cmd.env("BORG_PASSPHRASE", pass);
@@ -186,7 +301,7 @@ fn list_archives(cfg: &Config, passphrase: Option<&str>) -> Result<Vec<BorgArchi
 
     let output = cmd
         .output()
-        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+        .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -203,12 +318,12 @@ fn list_archives(cfg: &Config, passphrase: Option<&str>) -> Result<Vec<BorgArchi
     Ok(parsed.archives)
 }
 
-fn list_items(cfg: &Config, archive: &str, passphrase: Option<&str>) -> Result<Vec<BorgItem>> {
-    let mut cmd = Command::new(&cfg.borg_bin);
+fn list_items(ctx: &RepoCtx, archive: &str, passphrase: Option<&str>) -> Result<Vec<BorgItem>> {
+    let mut cmd = Command::new(&ctx.borg_bin);
     cmd.args([
         "list",
         "--json-lines",
-        &format!("{}::{}", cfg.repo, archive),
+        &format!("{}::{}", ctx.repo, archive),
     ]);
 
     if let Some(pass) = passphrase {
@@ -217,7 +332,7 @@ fn list_items(cfg: &Config, archive: &str, passphrase: Option<&str>) -> Result<V
 
     let output = cmd
         .output()
-        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+        .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -319,7 +434,7 @@ fn select_archive_action(
 }
 
 fn extract_file(
-    cfg: &Config,
+    ctx: &RepoCtx,
     archive: &str,
     path_in_archive: &str,
     dest_dir: &str,
@@ -327,7 +442,7 @@ fn extract_file(
 ) -> Result<()> {
     fs::create_dir_all(dest_dir).with_context(|| format!("Create destination {}", dest_dir))?;
 
-    let mut cmd = Command::new(&cfg.borg_bin);
+    let mut cmd = Command::new(&ctx.borg_bin);
     cmd.current_dir(dest_dir);
     cmd.arg("extract");
 
@@ -340,7 +455,7 @@ fn extract_file(
         cmd.args(["--strip-components", &strip_components.to_string()]);
     }
 
-    cmd.args([&format!("{}::{}", cfg.repo, archive), path_in_archive]);
+    cmd.args([&format!("{}::{}", ctx.repo, archive), path_in_archive]);
 
     if let Some(pass) = passphrase {
         cmd.env("BORG_PASSPHRASE", pass);
@@ -348,7 +463,7 @@ fn extract_file(
 
     let output = cmd
         .output()
-        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+        .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -363,7 +478,7 @@ fn extract_file(
 }
 
 fn mount_archive(
-    cfg: &Config,
+    ctx: &RepoCtx,
     archive: &str,
     mountpoint: &Path,
     passphrase: Option<&str>,
@@ -371,10 +486,10 @@ fn mount_archive(
     fs::create_dir_all(mountpoint)
         .with_context(|| format!("Create mountpoint {}", mountpoint.display()))?;
 
-    let mut cmd = Command::new(&cfg.borg_bin);
+    let mut cmd = Command::new(&ctx.borg_bin);
     cmd.args([
         "mount",
-        &format!("{}::{}", cfg.repo, archive),
+        &format!("{}::{}", ctx.repo, archive),
         &mountpoint.display().to_string(),
     ]);
 
@@ -384,7 +499,7 @@ fn mount_archive(
 
     let output = cmd
         .output()
-        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+        .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -398,8 +513,8 @@ fn mount_archive(
     Ok(())
 }
 
-fn umount_archive(cfg: &Config, mountpoint: &Path, passphrase: Option<&str>) -> Result<()> {
-    let mut cmd = Command::new(&cfg.borg_bin);
+fn umount_archive(ctx: &RepoCtx, mountpoint: &Path, passphrase: Option<&str>) -> Result<()> {
+    let mut cmd = Command::new(&ctx.borg_bin);
     cmd.args(["umount", &mountpoint.display().to_string()]);
 
     if let Some(pass) = passphrase {
@@ -408,7 +523,7 @@ fn umount_archive(cfg: &Config, mountpoint: &Path, passphrase: Option<&str>) -> 
 
     let output = cmd
         .output()
-        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+        .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -422,15 +537,15 @@ fn umount_archive(cfg: &Config, mountpoint: &Path, passphrase: Option<&str>) -> 
     Ok(())
 }
 
-fn default_mountpoint(cfg: &Config, archive: &str) -> PathBuf {
-    cfg.mount_root.join(archive)
+fn default_mountpoint(ctx: &RepoCtx, archive: &str) -> PathBuf {
+    ctx.mount_root.join(archive)
 }
 
-fn ensure_mount_available(cfg: &Config) -> Result<bool> {
-    let output = Command::new(&cfg.borg_bin)
+fn ensure_mount_available(ctx: &RepoCtx) -> Result<bool> {
+    let output = Command::new(&ctx.borg_bin)
         .args(["mount", "--help"])
         .output()
-        .with_context(|| format!("Failed to invoke {} binary", cfg.borg_bin))?;
+        .with_context(|| format!("Failed to invoke {} binary", ctx.borg_bin))?;
 
     let combined = format!(
         "{}\n{}",
@@ -451,27 +566,27 @@ fn ensure_mount_available(cfg: &Config) -> Result<bool> {
     Ok(true)
 }
 
-fn ensure_passphrase(cfg: &Config) -> Result<Option<String>> {
+fn ensure_passphrase(ctx: &RepoCtx) -> Result<Option<String>> {
     if env::var("BORG_PASSCOMMAND").is_ok() || env::var("BORG_PASSPHRASE").is_ok() {
         return Ok(None);
     }
 
     let prompt = format!(
         "Enter passphrase for repo {} (leave empty if none): ",
-        cfg.repo
+        ctx.repo
     );
     let pass = prompt_password(prompt).context("Reading passphrase failed")?;
     Ok(Some(pass))
 }
 
-fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
+fn run_interactive(repo: &RepoCtx, passphrase: Option<String>) -> Result<()> {
     let theme = ColorfulTheme::default();
     let current_pass = passphrase;
     let mut mount_state: Option<MountInfo> = None;
-    let mount_available = ensure_mount_available(cfg).unwrap_or(false);
+    let mount_available = ensure_mount_available(repo).unwrap_or(false);
 
     loop {
-        let archives = list_archives(cfg, current_pass.as_deref())?;
+        let archives = list_archives(repo, current_pass.as_deref())?;
         if archives.is_empty() {
             println!("No archives found");
             return Ok(());
@@ -490,7 +605,7 @@ fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
 
         match select_archive_action(&theme, mount_state.is_some(), mount_available)? {
             ArchiveAction::Browse => {
-                browse_files(cfg, &archive, current_pass.as_deref(), &theme)?;
+                browse_files(repo, &archive, current_pass.as_deref(), &theme)?;
             }
             ArchiveAction::Mount => {
                 if let Some(active) = &mount_state {
@@ -502,20 +617,20 @@ fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
                         .default(true)
                         .interact()?
                     {
-                        umount_archive(cfg, &active.mountpoint, current_pass.as_deref())?;
+                        umount_archive(repo, &active.mountpoint, current_pass.as_deref())?;
                         println!("Unmounted {}", active.mountpoint.display());
                     } else {
                         continue;
                     }
                 }
 
-                let default_mp = default_mountpoint(cfg, &archive.name);
+                let default_mp = default_mountpoint(repo, &archive.name);
                 let target: String = Input::with_theme(&theme)
                     .with_prompt("Mountpoint")
                     .default(default_mp.display().to_string())
                     .interact_text()?;
                 let target_path = PathBuf::from(target);
-                mount_archive(cfg, &archive.name, &target_path, current_pass.as_deref())?;
+                mount_archive(repo, &archive.name, &target_path, current_pass.as_deref())?;
                 println!("Mounted {} at {}", archive.name, target_path.display());
                 mount_state = Some(MountInfo {
                     archive: archive.name.clone(),
@@ -525,7 +640,7 @@ fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
             ArchiveAction::Back => {}
             ArchiveAction::UnmountCurrent => {
                 if let Some(active) = mount_state.take() {
-                    umount_archive(cfg, &active.mountpoint, current_pass.as_deref())?;
+                    umount_archive(repo, &active.mountpoint, current_pass.as_deref())?;
                     println!("Unmounted {}", active.mountpoint.display());
                 }
             }
@@ -534,13 +649,13 @@ fn run_interactive(cfg: &Config, passphrase: Option<String>) -> Result<()> {
 }
 
 fn browse_files(
-    cfg: &Config,
+    repo: &RepoCtx,
     archive: &BorgArchive,
     passphrase: Option<&str>,
     theme: &ColorfulTheme,
 ) -> Result<()> {
     loop {
-        let items = list_items(cfg, &archive.name, passphrase)?;
+        let items = list_items(repo, &archive.name, passphrase)?;
         if items.is_empty() {
             println!("No files in archive {}", archive.name);
             return Ok(());
@@ -563,7 +678,7 @@ fn browse_files(
                 .with_prompt("Destination directory")
                 .default(".".to_string())
                 .interact_text()?;
-            extract_file(cfg, &archive.name, &item.path, &dest, passphrase)?;
+            extract_file(repo, &archive.name, &item.path, &dest, passphrase)?;
             println!("Extracted to {}", dest);
         }
     }
