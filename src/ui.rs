@@ -153,7 +153,7 @@ pub fn select_main_action(theme: &ColorfulTheme) -> Result<MainAction> {
         Some(0) => MainAction::Archives,
         Some(1) => MainAction::Backups,
         Some(2) => MainAction::BackRepo,
-        None => MainAction::BackRepo, // Esc -> go back one level
+        None => MainAction::Quit, // Esc should exit application from main menu
         _ => MainAction::Quit,
     };
     Ok(action)
