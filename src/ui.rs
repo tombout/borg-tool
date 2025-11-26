@@ -69,6 +69,16 @@ fn show_error_and_wait(message: &str) {
     let _ = term.read_line();
 }
 
+fn show_repo_select_header(host: &str) -> Result<()> {
+    let term = Term::stdout();
+    term.clear_screen()?;
+    term.write_line(&format!("Host: {} | Repo: (choose) | Mount: n/a", host))?;
+    term.write_line("")?;
+    term.write_line("Choose repository")?;
+    term.write_line("")?;
+    Ok(())
+}
+
 fn show_step_with_ctx(
     title: &str,
     lines: &[String],
@@ -153,7 +163,7 @@ pub fn select_main_action(theme: &ColorfulTheme) -> Result<MainAction> {
         Some(0) => MainAction::Archives,
         Some(1) => MainAction::Backups,
         Some(2) => MainAction::BackRepo,
-        None => MainAction::Quit, // Esc should exit application from main menu
+        None => MainAction::BackRepo, // Esc should go back to repo selection
         _ => MainAction::Quit,
     };
     Ok(action)
@@ -217,12 +227,13 @@ pub fn select_repo_ctx(
         anyhow::bail!("Repo '{}' not found. Available: {}", req, names.join(", "));
     }
 
+    let host = short_hostname();
     // interactive selection allowed only for interactive commands
     match cmd {
         None
         | Some(crate::cli::Commands::Interactive)
         | Some(crate::cli::Commands::Backup { .. }) => loop {
-            show_step("Choose repository", &[])?;
+            show_repo_select_header(&host)?;
             let mut labels: Vec<String> = repos
                 .iter()
                 .map(|r| format!("{}  ({}) [{}]", r.name, r.repo, status_label(r.status)))
