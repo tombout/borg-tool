@@ -27,7 +27,11 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_AR=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
@@ -41,11 +45,11 @@ jobs:
           cp "$release_dir/borg-tool-rs" "$release_dir/borg-tool-rs-${{ matrix.target }}"
           (cd "$release_dir" && sha256sum "borg-tool-rs-${{ matrix.target }}" > "SHA256SUMS-${{ matrix.target }}")
 
-      - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --locked
-
-      - name: Generate SBOM
-        run: cargo cyclonedx -f json --all > sbom-${{ matrix.target }}.json
+      - name: Verify artifacts
+        run: |
+          ls -lh target/${{ matrix.target }}/release
+          test -s "target/${{ matrix.target }}/release/borg-tool-rs-${{ matrix.target }}"
+          test -s "target/${{ matrix.target }}/release/SHA256SUMS-${{ matrix.target }}"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
@@ -53,6 +57,61 @@ jobs:
           files: |
             target/${{ matrix.target }}/release/borg-tool-rs-${{ matrix.target }}
             target/${{ matrix.target }}/release/SHA256SUMS-${{ matrix.target }}
-            sbom-${{ matrix.target }}.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sbom:
+    name: SBOM (non-blocking)
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: write
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.cargo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+
+      - name: Cache cargo-cyclonedx and registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/bin/cargo-cyclonedx
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+          key: sbom-cyclonedx-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM
+        run: |
+          cargo cyclonedx -f json --all --target-dir target/sbom > sbom.json || echo "SBOM generation failed" >> sbom.log
+
+      - name: Verify SBOM
+        id: verify_sbom
+        run: |
+          if [ -s sbom.json ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "SBOM generated"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "SBOM missing; see sbom.log (non-blocking)"
+          fi
+
+      - name: Upload SBOM asset
+        if: steps.verify_sbom.outputs.ok == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sbom.json
+            sbom.log
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
