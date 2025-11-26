@@ -293,6 +293,8 @@ pub fn run_backup(ctx: &RepoCtx, preset: &BackupConfig, passphrase: Option<&str>
         anyhow::bail!("Backup '{}' has no includes configured", preset.name);
     }
 
+    let repo_exclude =
+        repo_exclude_pattern(ctx).filter(|pat| !preset.excludes.iter().any(|e| e == pat));
     let archive_name = build_archive_name(preset, &ctx.name);
 
     with_spinner(&format!("Creating {}", archive_name), |_pb| {
@@ -310,6 +312,10 @@ pub fn run_backup(ctx: &RepoCtx, preset: &BackupConfig, passphrase: Option<&str>
             }
             for pat in &preset.excludes {
                 cmd.args(["--exclude", pat]);
+            }
+            if let Some(exclude) = &repo_exclude {
+                // avoid backing up the repo itself when includes point above it
+                cmd.args(["--exclude", exclude]);
             }
 
             cmd.arg(format!("{}::{}", ctx.repo, archive_name));
@@ -338,6 +344,17 @@ pub fn run_backup(ctx: &RepoCtx, preset: &BackupConfig, passphrase: Option<&str>
 
     println!("Backup '{}' completed", archive_name);
     Ok(())
+}
+
+fn repo_exclude_pattern(ctx: &RepoCtx) -> Option<String> {
+    let path = std::path::Path::new(&ctx.repo);
+    if !path.is_absolute() || !path.exists() {
+        return None;
+    }
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_str()
+        .map(|s| s.to_string())
 }
 
 pub fn ensure_passphrase(ctx: &RepoCtx) -> Result<Option<String>> {
@@ -440,6 +457,31 @@ pub fn repo_status(repo: &str, probe_ssh: bool) -> super::config::RepoStatus {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn fake_borg_binary(dir: &tempfile::TempDir, capture: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.path().join("fake-borg");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            capture.display()
+        );
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn captured_args(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
     #[test]
     fn build_archive_name_uses_prefix_and_preset() {
         let preset = BackupConfig {
@@ -489,5 +531,172 @@ mod tests {
         assert_eq!(extract_ssh_host("ssh://host/repo"), Some("host".into()));
         assert_eq!(extract_ssh_host("user@host:/repo"), Some("host".into()));
         assert_eq!(extract_ssh_host("host"), None);
+    }
+
+    #[test]
+    fn repo_exclude_pattern_returns_local_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        let ctx = RepoCtx {
+            name: "r".into(),
+            repo: repo_path.to_string_lossy().into_owned(),
+            borg_bin: "borg".into(),
+            mount_root: tmp.path().join("mnt"),
+            backups: vec![],
+            status: super::super::config::RepoStatus::Ok,
+        };
+
+        let exclude = repo_exclude_pattern(&ctx).expect("should produce exclude");
+        assert_eq!(
+            exclude,
+            repo_path
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn repo_exclude_pattern_skips_remote() {
+        let ctx = RepoCtx {
+            name: "r".into(),
+            repo: "ssh://user@host/remote".into(),
+            borg_bin: "borg".into(),
+            mount_root: "/mnt".into(),
+            backups: vec![],
+            status: super::super::config::RepoStatus::Unknown,
+        };
+
+        assert!(repo_exclude_pattern(&ctx).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_backup_adds_repo_exclude_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        let capture = tmp.path().join("args.txt");
+        let borg_bin = fake_borg_binary(&tmp, &capture);
+
+        let preset = BackupConfig {
+            name: "home".into(),
+            includes: vec![tmp.path().to_string_lossy().into_owned()],
+            excludes: vec![],
+            compression: None,
+            one_file_system: false,
+            exclude_caches: false,
+            archive_prefix: None,
+        };
+        let ctx = RepoCtx {
+            name: "r".into(),
+            repo: repo_path.to_string_lossy().into_owned(),
+            borg_bin: borg_bin.to_string_lossy().into_owned(),
+            mount_root: tmp.path().join("mnt"),
+            backups: vec![],
+            status: super::super::config::RepoStatus::Ok,
+        };
+
+        run_backup(&ctx, &preset, None).unwrap();
+
+        let args = captured_args(&capture);
+        let exclude_count = args.iter().filter(|a| *a == "--exclude").count();
+        assert_eq!(exclude_count, 1, "expected exactly one auto-exclude");
+
+        let expected_path = repo_path
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            args.windows(2).any(
+                |w| matches!(w, [flag, path] if flag == "--exclude" && path == &expected_path)
+            ),
+            "exclude list should contain canonical repo path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_backup_skips_repo_exclude_when_already_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        let capture = tmp.path().join("args.txt");
+        let borg_bin = fake_borg_binary(&tmp, &capture);
+        let canonical = repo_path
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let preset = BackupConfig {
+            name: "home".into(),
+            includes: vec![tmp.path().to_string_lossy().into_owned()],
+            excludes: vec![canonical.clone()],
+            compression: None,
+            one_file_system: false,
+            exclude_caches: false,
+            archive_prefix: None,
+        };
+        let ctx = RepoCtx {
+            name: "r".into(),
+            repo: repo_path.to_string_lossy().into_owned(),
+            borg_bin: borg_bin.to_string_lossy().into_owned(),
+            mount_root: tmp.path().join("mnt"),
+            backups: vec![],
+            status: super::super::config::RepoStatus::Ok,
+        };
+
+        run_backup(&ctx, &preset, None).unwrap();
+
+        let args = captured_args(&capture);
+        let exclude_count = args.iter().filter(|a| *a == "--exclude").count();
+        assert_eq!(
+            exclude_count, 1,
+            "should not add a second repo exclude when already specified"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| matches!(w, [flag, path] if flag == "--exclude" && path == &canonical)),
+            "preset exclude should remain intact"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_backup_does_not_add_exclude_for_relative_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let capture = tmp.path().join("args.txt");
+        let borg_bin = fake_borg_binary(&tmp, &capture);
+
+        let preset = BackupConfig {
+            name: "home".into(),
+            includes: vec![tmp.path().to_string_lossy().into_owned()],
+            excludes: vec![],
+            compression: None,
+            one_file_system: false,
+            exclude_caches: false,
+            archive_prefix: None,
+        };
+        let ctx = RepoCtx {
+            name: "r".into(),
+            repo: "relative/repo".into(),
+            borg_bin: borg_bin.to_string_lossy().into_owned(),
+            mount_root: tmp.path().join("mnt"),
+            backups: vec![],
+            status: super::super::config::RepoStatus::Ok,
+        };
+
+        run_backup(&ctx, &preset, None).unwrap();
+
+        let args = captured_args(&capture);
+        let exclude_count = args.iter().filter(|a| *a == "--exclude").count();
+        assert_eq!(
+            exclude_count, 0,
+            "relative repo path should not trigger automatic exclude"
+        );
     }
 }
