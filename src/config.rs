@@ -98,6 +98,18 @@ pub fn default_probe_ssh() -> bool {
     true
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            repos: Vec::new(),
+            repo: None,
+            borg_bin: default_borg_bin(),
+            mount_root: default_mount_root(),
+            probe_ssh: default_probe_ssh(),
+        }
+    }
+}
+
 pub fn default_config_path() -> PathBuf {
     if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("borg-tool").join("config.toml");
@@ -183,4 +195,19 @@ pub fn save_config(cfg: &Config, path: &Path) -> Result<()> {
     fs::write(path, content)
         .with_context(|| format!("Cannot write config file {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_matches_field_defaults() {
+        let cfg = Config::default();
+        assert!(cfg.repos.is_empty());
+        assert!(cfg.repo.is_none());
+        assert_eq!(cfg.borg_bin, default_borg_bin());
+        assert!(cfg.mount_root.ends_with("borg-tool-mounts"));
+        assert!(cfg.probe_ssh);
+    }
 }

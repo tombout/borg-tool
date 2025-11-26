@@ -181,7 +181,16 @@ pub fn select_repo_ctx(
 ) -> Result<Option<RepoCtx>> {
     let mut repos = build_repo_list(cfg);
     if repos.is_empty() {
-        anyhow::bail!("No repositories configured in config file");
+        match cmd {
+            None | Some(crate::cli::Commands::Interactive) => {
+                show_step(
+                    "No repositories configured",
+                    &["Let's set up a repository to get started.".to_string()],
+                )?;
+                return setup_new_repo_wizard(cfg, config_path, theme);
+            }
+            _ => anyhow::bail!("No repositories configured in config file"),
+        }
     }
 
     // Single repo fast path

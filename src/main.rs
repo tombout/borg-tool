@@ -3,17 +3,44 @@ mod cli;
 mod config;
 mod ui;
 
+use std::io::ErrorKind;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 
-fn main() -> Result<()> {
-    let cli = cli::Cli::parse();
-    let cmd = cli.command;
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .map(|ioe| ioe.kind() == ErrorKind::NotFound)
+            .unwrap_or(false)
+    })
+}
 
-    let (mut config, config_path) =
-        config::load_config_resolved(cli.config).with_context(|| {
+fn main() -> Result<()> {
+    let cli::Cli {
+        config: cli_config,
+        repo: cli_repo,
+        command: cmd,
+    } = cli::Cli::parse();
+
+    let (mut config, config_path) = match config::load_config_resolved(cli_config.clone())
+        .with_context(|| {
             "Failed to load config (searched default path and ./config.toml when unset)".to_string()
-        })?;
+        }) {
+        Ok(cfg) => cfg,
+        Err(err)
+            if matches!(cmd, None | Some(cli::Commands::Interactive)) && is_not_found(&err) =>
+        {
+            let config_path = cli_config.unwrap_or_else(config::default_config_path);
+            eprintln!(
+                "No config file found ({}). Starting interactive setup…",
+                err
+            );
+            (config::Config::default(), config_path)
+        }
+        Err(err) => return Err(err),
+    };
 
     let theme = ui::dialog_theme();
     let mut passphrase_cache: Option<String> = None;
@@ -23,7 +50,7 @@ fn main() -> Result<()> {
             let repo_ctx = match ui::select_repo_ctx(
                 &mut config,
                 &config_path,
-                cli.repo.as_deref(),
+                cli_repo.as_deref(),
                 cmd.as_ref(),
                 &theme,
             )? {
@@ -39,7 +66,7 @@ fn main() -> Result<()> {
             let repo_ctx = ui::select_repo_ctx(
                 &mut config,
                 &config_path,
-                cli.repo.as_deref(),
+                cli_repo.as_deref(),
                 cmd.as_ref(),
                 &theme,
             )?
@@ -52,7 +79,7 @@ fn main() -> Result<()> {
             let repo_ctx = ui::select_repo_ctx(
                 &mut config,
                 &config_path,
-                cli.repo.as_deref(),
+                cli_repo.as_deref(),
                 cmd.as_ref(),
                 &theme,
             )?
@@ -80,7 +107,7 @@ fn main() -> Result<()> {
             let repo_ctx = ui::select_repo_ctx(
                 &mut config,
                 &config_path,
-                cli.repo.as_deref(),
+                cli_repo.as_deref(),
                 cmd.as_ref(),
                 &theme,
             )?
@@ -97,7 +124,7 @@ fn main() -> Result<()> {
             let repo_ctx = ui::select_repo_ctx(
                 &mut config,
                 &config_path,
-                cli.repo.as_deref(),
+                cli_repo.as_deref(),
                 cmd.as_ref(),
                 &theme,
             )?
@@ -110,7 +137,7 @@ fn main() -> Result<()> {
             let repo_ctx = ui::select_repo_ctx(
                 &mut config,
                 &config_path,
-                cli.repo.as_deref(),
+                cli_repo.as_deref(),
                 cmd.as_ref(),
                 &theme,
             )?
