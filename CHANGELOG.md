@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 - _
 
+## [v0.1.1] - 2025-11-26
+
+### Fixed
+- Interactive startup now launches the setup wizard when no config file exists or is empty, instead of failing.
+- Esc from the main menu now quits the application instead of looping back.
+
 ## [v0.1.0] - 2025-11-25
 
 First public release of the Borg helper CLI.
@@ -22,6 +28,6 @@ First public release of the Borg helper CLI.
 - SSH probing toggle for remote repos; passphrase/env integration via borg (`BORG_PASSPHRASE`, `BORG_PASSCOMMAND`).
 - MIT licensed.
 
-[Unreleased]: https://github.com/tombout/borg-tool-rs/compare/v0.1.0...HEAD
-
+[Unreleased]: https://github.com/tombout/borg-tool-rs/compare/v0.1.1...HEAD
+[v0.1.1]: https://github.com/tombout/borg-tool-rs/releases/tag/v0.1.1
 [v0.1.0]: https://github.com/tombout/borg-tool-rs/releases/tag/v0.1.0
