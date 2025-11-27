@@ -272,7 +272,7 @@ pub fn init_repo(ctx: &RepoCtx, encryption: &str, passphrase: Option<&str>) -> R
 }
 
 pub fn build_archive_name(preset: &BackupConfig, repo_name: &str) -> String {
-    let ts = Local::now().format("%Y%m%d-%H%M%S");
+    let ts = Local::now().format("%Y-%m-%d_%H-%M-%S");
     let mut segments = Vec::new();
 
     if let Some(prefix) = preset.archive_prefix.as_deref() {
